@@ -1,0 +1,18 @@
+[package]
+name = "edns_proxy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.94"
+async-trait = "0.1.83"
+deadpool = "0.12.1"
+enum_dispatch = "0.3.13"
+futures-util = "0.3.30"
+hickory-proto = { version = "0.24.2", features = ["dns-over-rustls", "native-certs"] }
+hickory-server = "0.24.2"
+rand = "0.8.5"
+rustls = "0.21.12"
+rustls-native-certs = "0.8.1"
+tokio = { version = "1.42.0", features = ["macros", "net", "rt-multi-thread"] }
+tracing = "0.1.41"
