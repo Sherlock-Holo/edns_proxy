@@ -9,7 +9,7 @@ async-trait = "0.1.83"
 deadpool = "0.12.1"
 enum_dispatch = "0.3.13"
 futures-util = "0.3.30"
-hickory-proto = { version = "0.24.2", features = ["dns-over-rustls", "native-certs"] }
+hickory-proto = { version = "0.24.2", features = ["dnssec", "dns-over-rustls", "native-certs"] }
 hickory-server = "0.24.2"
 rand = "0.8.5"
 rustls = "0.21.12"
