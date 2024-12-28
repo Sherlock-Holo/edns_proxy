@@ -1,18 +1,124 @@
 use std::net::IpAddr;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use hickory_proto::op::{Edns, Header, Message, ResponseCode};
 use hickory_proto::rr::Record;
-use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsOption};
+use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
+use hickory_server::ServerFuture;
 use hickory_server::authority::{MessageResponse, MessageResponseBuilder};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
+use tokio::net::{TcpListener, UdpSocket};
 use tracing::error;
 
+use crate::addr::BindAddr;
 use crate::backend::{Backend, Backends};
+
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub struct ProxyTask {
+    server: ServerFuture<DnsHandler>,
+}
+
+impl ProxyTask {
+    pub async fn stop(&mut self) -> anyhow::Result<()> {
+        Ok(self.server.shutdown_gracefully().await?)
+    }
+}
+
+pub async fn start_proxy(
+    bind_addrs: Vec<BindAddr>,
+    ipv4_source_prefix: u8,
+    ipv6_source_prefix: u8,
+    backend: Backends,
+) -> anyhow::Result<ProxyTask> {
+    let mut server = ServerFuture::new(DnsHandler {
+        backend,
+        ipv4_source_prefix,
+        ipv6_source_prefix,
+    });
+
+    for bind_addr in bind_addrs {
+        match bind_addr {
+            BindAddr::Udp(addr) => {
+                let udp_socket = UdpSocket::bind(addr).await?;
+                server.register_socket(udp_socket);
+            }
+
+            BindAddr::Tcp { addr, timeout } => {
+                let tcp_listener = TcpListener::bind(addr).await?;
+                server.register_listener(tcp_listener, timeout.unwrap_or(DEFAULT_TIMEOUT));
+            }
+
+            BindAddr::Https {
+                addr,
+                certificate,
+                private_key,
+                timeout,
+            } => {
+                let tcp_listener = TcpListener::bind(addr).await?;
+                server.register_https_listener(
+                    tcp_listener,
+                    timeout.unwrap_or(DEFAULT_TIMEOUT),
+                    (certificate, private_key),
+                    None,
+                )?;
+            }
+
+            BindAddr::Tls {
+                addr,
+                certificate,
+                private_key,
+                timeout,
+            } => {
+                let tcp_listener = TcpListener::bind(addr).await?;
+                server.register_tls_listener(
+                    tcp_listener,
+                    timeout.unwrap_or(DEFAULT_TIMEOUT),
+                    (certificate, private_key),
+                )?;
+            }
+
+            BindAddr::Quic {
+                addr,
+                certificate,
+                private_key,
+                timeout,
+            } => {
+                let udp_socket = UdpSocket::bind(addr).await?;
+                server.register_quic_listener(
+                    udp_socket,
+                    timeout.unwrap_or(DEFAULT_TIMEOUT),
+                    (certificate, private_key),
+                    None,
+                )?;
+            }
+
+            BindAddr::H3 {
+                addr,
+                certificate,
+                private_key,
+                timeout,
+            } => {
+                let udp_socket = UdpSocket::bind(addr).await?;
+                server.register_h3_listener(
+                    udp_socket,
+                    timeout.unwrap_or(DEFAULT_TIMEOUT),
+                    (certificate, private_key),
+                    None,
+                )?;
+            }
+        }
+    }
+
+    Ok(ProxyTask { server })
+}
 
 #[derive(Debug)]
 struct DnsHandler {
     backend: Backends,
+    ipv4_source_prefix: u8,
+    ipv6_source_prefix: u8,
 }
 
 #[async_trait]
@@ -37,24 +143,26 @@ impl RequestHandler for DnsHandler {
         message
             .additionals_mut()
             .extend_from_slice(request.additionals());
-        if let Some(edns) = request.edns() {
-            *message.extensions_mut() = Some(edns.clone());
-        }
+
         for record in request.sig0() {
             message.add_sig0(record.clone());
         }
 
-        let src_ip = src_addr.ip();
-        let prefix = match src_ip {
-            IpAddr::V4(_) => 16,
-            IpAddr::V6(_) => 64,
-        };
+        let extensions = message.extensions_mut();
+        if let Some(edns) = request.edns() {
+            *extensions = Some(edns.clone());
+        }
 
-        message
-            .extensions_mut()
-            .get_or_insert(Edns::new())
-            .options_mut()
-            .insert(EdnsOption::Subnet(ClientSubnet::new(src_ip, prefix, 0)));
+        let opt = extensions.get_or_insert_with(Edns::new).options_mut();
+        if opt.get(EdnsCode::Subnet).is_none() {
+            let src_ip = src_addr.ip();
+            let prefix = match src_ip {
+                IpAddr::V4(_) => self.ipv4_source_prefix,
+                IpAddr::V6(_) => self.ipv6_source_prefix,
+            };
+
+            opt.insert(EdnsOption::Subnet(ClientSubnet::new(src_ip, prefix, 0)));
+        }
 
         match self.backend.send_request(message, src_addr).await {
             Err(err) => {

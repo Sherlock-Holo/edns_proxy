@@ -20,7 +20,7 @@ use tracing::{debug, error, instrument};
 
 use crate::backend::Backend;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TlsBackend {
     pool: Pool<TlsManager>,
 }

@@ -13,7 +13,7 @@ pub trait Backend {
 }
 
 #[enum_dispatch(Backend)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Backends {
     TlsBackend,
 }

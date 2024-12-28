@@ -6,13 +6,20 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.94"
 async-trait = "0.1.83"
+clap = { version = "4.5.23", features = ["derive"] }
 deadpool = "0.12.1"
 enum_dispatch = "0.3.13"
 futures-util = "0.3.30"
 hickory-proto = { version = "0.24.2", features = ["dnssec", "dns-over-rustls", "native-certs"] }
-hickory-server = "0.24.2"
+hickory-server = { version = "0.24.2", features = ["dns-over-h3", "dns-over-https-rustls", "dns-over-quic", "native-certs"] }
+humantime-serde = "1.1.1"
+itertools = "0.13.0"
 rand = "0.8.5"
 rustls = "0.21.12"
 rustls-native-certs = "0.8.1"
-tokio = { version = "1.42.0", features = ["macros", "net", "rt-multi-thread"] }
+rustls-pemfile = "1.0.4"
+serde = { version = "1.0.215", features = ["derive"] }
+serde_yaml = "0.9"
+tokio = { version = "1.42.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
