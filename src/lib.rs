@@ -21,7 +21,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Registry, fmt};
 
 use crate::addr::BindAddr;
-use crate::backend::{Backends, TlsBackend};
+use crate::backend::{Backends, HttpsBackend, TlsBackend};
 use crate::config::{BindAddrType, Config, Proxy};
 
 mod addr;
@@ -84,6 +84,22 @@ pub async fn run() -> anyhow::Result<()> {
                 let tls_backend = TlsBackend::new(addrs, tls_name)?;
 
                 Backends::from(tls_backend)
+            }
+
+            config::Backend::Https(config::HttpsBackend {
+                host,
+                port,
+                bootstrap,
+            }) => {
+                let addrs = bootstrap_domain(
+                    &bootstrap,
+                    &host,
+                    port.unwrap_or(config::HttpsBackend::DEFAULT_PORT),
+                )
+                .await?;
+                let https_backend = HttpsBackend::new(addrs, host)?;
+
+                Backends::from(https_backend)
             }
         };
 

@@ -88,7 +88,7 @@ struct Tls {
 
 impl Debug for Tls {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TlsBackend").finish_non_exhaustive()
+        f.debug_struct("Tls").finish_non_exhaustive()
     }
 }
 

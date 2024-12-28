@@ -16,7 +16,7 @@ proxy:
     bind_addr: 127.0.0.1:5454
     timeout: 20s
     backend:
-      type: tls
-      tls_name: dot.pub
+      type: https
+      host: doh.pub
       bootstrap:
         - 1.0.0.1:53

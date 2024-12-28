@@ -47,6 +47,7 @@ pub enum BindAddrType {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Backend {
     Tls(TlsBackend),
+    Https(HttpsBackend),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -71,6 +72,32 @@ impl Eq for TlsBackend {}
 impl Hash for TlsBackend {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.tls_name.hash(state);
+        self.port.hash(state);
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct HttpsBackend {
+    pub host: String,
+    pub port: Option<u16>,
+    pub bootstrap: HashSet<SocketAddr>,
+}
+
+impl HttpsBackend {
+    pub const DEFAULT_PORT: u16 = 443;
+}
+
+impl PartialEq for HttpsBackend {
+    fn eq(&self, other: &Self) -> bool {
+        self.host == other.host && self.port == other.port
+    }
+}
+
+impl Eq for HttpsBackend {}
+
+impl Hash for HttpsBackend {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.host.hash(state);
         self.port.hash(state);
     }
 }
