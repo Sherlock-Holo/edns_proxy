@@ -1,0 +1,24 @@
+proxy:
+  - ipv4_prefix: 15
+    ipv6_prefix: 56
+    type: udp
+    bind_addr: 127.0.0.1:5353
+    timeout: 20s
+    backend:
+      type: tls
+      addr:
+        - 1.12.12.12:853
+        - 120.53.53.53:853
+      tls_name: dot.pub
+
+  - ipv4_prefix: 15
+    ipv6_prefix: 56
+    type: udp
+    bind_addr: 127.0.0.1:5454
+    timeout: 20s
+    backend:
+      type: tls
+      addr:
+        - 1.12.12.12:853
+        - 120.53.53.53:853
+      tls_name: dot.pub

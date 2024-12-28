@@ -31,6 +31,7 @@ pub struct Proxy {
 }
 
 #[derive(Debug, Deserialize, Ord, PartialOrd, Eq, PartialEq, Copy, Clone, Hash)]
+#[serde(rename_all = "snake_case")]
 pub enum BindAddrType {
     Udp,
     Tcp,
@@ -48,6 +49,7 @@ pub struct Backend {
 }
 
 #[derive(Debug, Deserialize, Ord, PartialOrd, Eq, PartialEq, Copy, Clone, Hash)]
+#[serde(rename_all = "snake_case")]
 pub enum BackendType {
     // Udp,
     // Tcp,
