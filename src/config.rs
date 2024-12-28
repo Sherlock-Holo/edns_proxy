@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -42,19 +44,33 @@ pub enum BindAddrType {
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Hash, Clone)]
-pub struct Backend {
-    pub r#type: BackendType,
-    pub addr: Vec<SocketAddr>,
-    pub tls_name: Option<String>,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Backend {
+    Tls(TlsBackend),
 }
 
-#[derive(Debug, Deserialize, Ord, PartialOrd, Eq, PartialEq, Copy, Clone, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum BackendType {
-    // Udp,
-    // Tcp,
-    // Https,
-    Tls,
-    // Quic,
-    // H3,
+#[derive(Debug, Deserialize, Clone)]
+pub struct TlsBackend {
+    pub tls_name: String,
+    pub port: Option<u16>,
+    pub bootstrap: HashSet<SocketAddr>,
+}
+
+impl TlsBackend {
+    pub const DEFAULT_PORT: u16 = 853;
+}
+
+impl PartialEq for TlsBackend {
+    fn eq(&self, other: &Self) -> bool {
+        self.tls_name == other.tls_name && self.port == other.port
+    }
+}
+
+impl Eq for TlsBackend {}
+
+impl Hash for TlsBackend {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.tls_name.hash(state);
+        self.port.hash(state);
+    }
 }

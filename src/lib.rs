@@ -1,24 +1,28 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
 use std::io::BufReader;
+use std::net::SocketAddr;
 
 use clap::Parser;
 use clap::builder::styling;
 use futures_util::{FutureExt, select};
+use hickory_resolver::AsyncResolver;
+use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
+use hickory_resolver::error::ResolveErrorKind;
 use itertools::Itertools;
 use rustls::{Certificate, PrivateKey};
 use tokio::signal::unix;
 use tokio::signal::unix::SignalKind;
 use tracing::level_filters::LevelFilter;
-use tracing::{error, subscriber};
+use tracing::{error, instrument, subscriber};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Registry, fmt};
 
 use crate::addr::BindAddr;
 use crate::backend::{Backends, TlsBackend};
-use crate::config::{BackendType, BindAddrType, Config, Proxy};
+use crate::config::{BindAddrType, Config, Proxy};
 
 mod addr;
 mod backend;
@@ -65,12 +69,19 @@ pub async fn run() -> anyhow::Result<()> {
 
     let mut tasks = Vec::with_capacity(proxies.len());
     for (backend, proxies) in proxies {
-        let backend = match backend.r#type {
-            BackendType::Tls => {
-                let tls_name = backend
-                    .tls_name
-                    .ok_or_else(|| anyhow::anyhow!("tls backend must set tls_name"))?;
-                let tls_backend = TlsBackend::new(backend.addr.into_iter().collect(), tls_name)?;
+        let backend = match backend {
+            config::Backend::Tls(config::TlsBackend {
+                tls_name,
+                port,
+                bootstrap,
+            }) => {
+                let addrs = bootstrap_domain(
+                    &bootstrap,
+                    &tls_name,
+                    port.unwrap_or(config::TlsBackend::DEFAULT_PORT),
+                )
+                .await?;
+                let tls_backend = TlsBackend::new(addrs, tls_name)?;
 
                 Backends::from(tls_backend)
             }
@@ -98,6 +109,44 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[instrument(ret, err)]
+async fn bootstrap_domain(
+    bootstrap_addr: &HashSet<SocketAddr>,
+    domain: &str,
+    port: u16,
+) -> anyhow::Result<HashSet<SocketAddr>> {
+    let mut resolver_config = ResolverConfig::new();
+    for addr in bootstrap_addr {
+        resolver_config.add_name_server(NameServerConfig::new(*addr, Protocol::Udp));
+    }
+    let async_resolver = AsyncResolver::tokio(resolver_config, ResolverOpts::default());
+
+    let mut addrs = match async_resolver.ipv4_lookup(domain).await {
+        Err(err) if matches!(err.kind(), ResolveErrorKind::NoRecordsFound { .. }) => HashSet::new(),
+        Err(err) => return Err(err.into()),
+
+        Ok(ipv4_lookup) => ipv4_lookup
+            .into_iter()
+            .map(|ip| SocketAddr::new(ip.0.into(), port))
+            .collect(),
+    };
+
+    match async_resolver.ipv6_lookup(domain).await {
+        Err(err) if matches!(err.kind(), ResolveErrorKind::NoRecordsFound { .. }) => Ok(addrs),
+        Err(err) => Err(err.into()),
+
+        Ok(ipv6_lookup) => {
+            addrs.extend(
+                ipv6_lookup
+                    .into_iter()
+                    .map(|ip| SocketAddr::new(ip.0.into(), port)),
+            );
+
+            Ok(addrs)
+        }
+    }
 }
 
 fn create_bind_addr(proxy: Proxy) -> anyhow::Result<BindAddr> {

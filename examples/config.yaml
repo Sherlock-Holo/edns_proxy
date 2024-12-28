@@ -6,10 +6,9 @@ proxy:
     timeout: 20s
     backend:
       type: tls
-      addr:
-        - 1.12.12.12:853
-        - 120.53.53.53:853
       tls_name: dot.pub
+      bootstrap:
+        - 1.0.0.1:53
 
   - ipv4_prefix: 15
     ipv6_prefix: 56
@@ -18,7 +17,6 @@ proxy:
     timeout: 20s
     backend:
       type: tls
-      addr:
-        - 1.12.12.12:853
-        - 120.53.53.53:853
       tls_name: dot.pub
+      bootstrap:
+        - 1.0.0.1:53
