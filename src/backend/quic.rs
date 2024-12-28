@@ -1,13 +1,11 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
 use futures_util::TryStreamExt;
-use hickory_proto::h2::{HttpsClientStream, HttpsClientStreamBuilder};
 use hickory_proto::op::Message;
-use hickory_proto::runtime::TokioRuntimeProvider;
+use hickory_proto::quic::{QuicClientStream, QuicClientStreamBuilder};
 use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse};
 use rand::prelude::IteratorRandom;
 use rand::thread_rng;
@@ -17,16 +15,12 @@ use tracing::{error, instrument};
 use crate::backend::Backend;
 
 #[derive(Debug, Clone)]
-pub struct HttpsBackend {
-    pool: Pool<HttpsManager>,
+pub struct QuicBackend {
+    pool: Pool<QuicManager>,
 }
 
-impl HttpsBackend {
-    pub fn new(
-        addrs: HashSet<SocketAddr>,
-        host: String,
-        query_path: String,
-    ) -> anyhow::Result<Self> {
+impl QuicBackend {
+    pub fn new(addrs: HashSet<SocketAddr>, host: String) -> anyhow::Result<Self> {
         let mut root_cert_store = RootCertStore::empty();
         let certs = rustls_native_certs::load_native_certs();
         if !certs.errors.is_empty() {
@@ -43,14 +37,13 @@ impl HttpsBackend {
             .with_root_certificates(root_cert_store)
             .with_no_client_auth();
 
-        let pool = Pool::builder(HttpsManager {
+        let mut builder = QuicClientStreamBuilder::default();
+        builder.crypto_config(client_config);
+
+        let pool = Pool::builder(QuicManager {
             addrs,
             host,
-            query_path,
-            builder: HttpsClientStreamBuilder::with_client_config(
-                Arc::new(client_config),
-                TokioRuntimeProvider::new(),
-            ),
+            builder,
         })
         .build()?;
 
@@ -58,13 +51,13 @@ impl HttpsBackend {
     }
 }
 
-impl Backend for HttpsBackend {
+impl Backend for QuicBackend {
     #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
         for _ in 0..3 {
             let mut obj = match self.pool.get().await {
                 Err(err) => {
-                    error!(%err, "get https session failed");
+                    error!(%err, "get quic session failed");
 
                     continue;
                 }
@@ -72,7 +65,7 @@ impl Backend for HttpsBackend {
                 Ok(obj) => obj,
             };
 
-            if let Ok(Some(resp)) = obj.send_to_https(message.clone()).await {
+            if let Ok(Some(resp)) = obj.send_to_quic(message.clone()).await {
                 return Ok(resp);
             } else {
                 let _ = Object::take(obj);
@@ -83,52 +76,51 @@ impl Backend for HttpsBackend {
     }
 }
 
-struct Https {
-    https_client_stream: HttpsClientStream,
+struct Quic {
+    quic_client_stream: QuicClientStream,
 }
 
-impl Debug for Https {
+impl Debug for Quic {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Https")
-            .field("https_client_stream", &self.https_client_stream.to_string())
+        f.debug_struct("Quic")
+            .field("quic_client_stream", &self.quic_client_stream.to_string())
             .finish()
     }
 }
 
-impl Https {
+impl Quic {
     #[instrument(level = "debug", ret, err)]
-    async fn send_to_https(&mut self, message: Message) -> anyhow::Result<Option<DnsResponse>> {
+    async fn send_to_quic(&mut self, message: Message) -> anyhow::Result<Option<DnsResponse>> {
         let mut dns_request_options = DnsRequestOptions::default();
         dns_request_options.use_edns = true;
         let mut dns_response_stream = self
-            .https_client_stream
+            .quic_client_stream
             .send_message(DnsRequest::new(message, dns_request_options));
 
         Ok(dns_response_stream.try_next().await.inspect_err(|_| {
-            // drop the incorrect state https session
-            self.https_client_stream.shutdown();
+            // drop the incorrect state quic session
+            self.quic_client_stream.shutdown();
         })?)
     }
 }
 
-struct HttpsManager {
+struct QuicManager {
     addrs: HashSet<SocketAddr>,
     host: String,
-    query_path: String,
-    builder: HttpsClientStreamBuilder<TokioRuntimeProvider>,
+    builder: QuicClientStreamBuilder,
 }
 
-impl Debug for HttpsManager {
+impl Debug for QuicManager {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpsManager")
+        f.debug_struct("QuicManager")
             .field("addrs", &self.addrs)
             .field("host", &self.host)
             .finish_non_exhaustive()
     }
 }
 
-impl Manager for HttpsManager {
-    type Type = Https;
+impl Manager for QuicManager {
+    type Type = Quic;
     type Error = anyhow::Error;
 
     #[instrument(level = "debug", err)]
@@ -140,15 +132,9 @@ impl Manager for HttpsManager {
             .choose(&mut thread_rng())
             .expect("addrs must not empty");
 
-        let https_client_stream = self
-            .builder
-            .clone()
-            .build(addr, self.host.clone(), self.query_path.clone())
-            .await?;
+        let quic_client_stream = self.builder.clone().build(addr, self.host.clone()).await?;
 
-        Ok(Https {
-            https_client_stream,
-        })
+        Ok(Quic { quic_client_stream })
     }
 
     async fn recycle(

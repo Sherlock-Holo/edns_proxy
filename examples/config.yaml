@@ -18,6 +18,7 @@ proxy:
     backend:
       type: https
       host: doh.pub
+      path: /dns-query
       bootstrap:
         - 1.0.0.1:53
 
@@ -29,4 +30,27 @@ proxy:
     backend:
       type: udp
       addr:
+        - 1.0.0.1:53
+
+  - ipv4_prefix: 15
+    ipv6_prefix: 56
+    type: udp
+    bind_addr: 127.0.0.1:5656
+    timeout: 20s
+    backend:
+      type: h3
+      host: dns.alidns.com
+      path: /dns-query
+      bootstrap:
+        - 1.0.0.1:53
+
+  - ipv4_prefix: 15
+    ipv6_prefix: 56
+    type: udp
+    bind_addr: 127.0.0.1:5757
+    timeout: 20s
+    backend:
+      type: quic
+      tls_name: dns.alidns.com
+      bootstrap:
         - 1.0.0.1:53

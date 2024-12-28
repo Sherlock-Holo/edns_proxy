@@ -26,6 +26,8 @@ pub struct Proxy {
     pub ipv6_prefix: u8,
     pub r#type: BindAddrType,
     pub bind_addr: SocketAddr,
+    pub bind_domain: Option<String>,
+    pub bind_path: Option<String>,
     pub timeout: Option<Serde<Duration>>,
     pub private_key: Option<String>,
     pub certificate: Option<String>,
@@ -47,19 +49,24 @@ pub enum BindAddrType {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Backend {
     Tls(TlsBackend),
-    Https(HttpsBackend),
     Udp(UdpBackend),
+    Https(HttpsBasedBackend),
+    H3(HttpsBasedBackend),
+    Quic(TlsBackend),
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct TlsBackend {
     pub tls_name: String,
-    pub port: Option<u16>,
+    #[serde(default = "TlsBackend::default_port")]
+    pub port: u16,
     pub bootstrap: HashSet<SocketAddr>,
 }
 
 impl TlsBackend {
-    pub const DEFAULT_PORT: u16 = 853;
+    const fn default_port() -> u16 {
+        853
+    }
 }
 
 impl PartialEq for TlsBackend {
@@ -78,25 +85,34 @@ impl Hash for TlsBackend {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct HttpsBackend {
+pub struct HttpsBasedBackend {
     pub host: String,
-    pub port: Option<u16>,
+    #[serde(default = "HttpsBasedBackend::default_path")]
+    pub path: String,
+    #[serde(default = "HttpsBasedBackend::default_port")]
+    pub port: u16,
     pub bootstrap: HashSet<SocketAddr>,
 }
 
-impl HttpsBackend {
-    pub const DEFAULT_PORT: u16 = 443;
+impl HttpsBasedBackend {
+    const fn default_port() -> u16 {
+        443
+    }
+
+    fn default_path() -> String {
+        "/dns-query".to_string()
+    }
 }
 
-impl PartialEq for HttpsBackend {
+impl PartialEq for HttpsBasedBackend {
     fn eq(&self, other: &Self) -> bool {
         self.host == other.host && self.port == other.port
     }
 }
 
-impl Eq for HttpsBackend {}
+impl Eq for HttpsBasedBackend {}
 
-impl Hash for HttpsBackend {
+impl Hash for HttpsBasedBackend {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.host.hash(state);
         self.port.hash(state);
@@ -106,4 +122,5 @@ impl Hash for HttpsBackend {
 #[derive(Debug, Deserialize, Clone, Eq, PartialEq, Hash)]
 pub struct UdpBackend {
     pub addr: Vec<SocketAddr>,
+    pub timeout: Option<Serde<Duration>>,
 }

@@ -15,6 +15,7 @@ use crate::addr::BindAddr;
 use crate::backend::{Backend, Backends};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_ENDPOINT: &str = "/dns-query";
 
 pub struct ProxyTask {
     server: ServerFuture<DnsHandler>,
@@ -54,6 +55,8 @@ pub async fn start_proxy(
                 addr,
                 certificate,
                 private_key,
+                domain,
+                path,
                 timeout,
             } => {
                 let tcp_listener = TcpListener::bind(addr).await?;
@@ -61,7 +64,8 @@ pub async fn start_proxy(
                     tcp_listener,
                     timeout.unwrap_or(DEFAULT_TIMEOUT),
                     (certificate, private_key),
-                    None,
+                    domain,
+                    path.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
                 )?;
             }
 
@@ -144,9 +148,10 @@ impl RequestHandler for DnsHandler {
             .additionals_mut()
             .extend_from_slice(request.additionals());
 
-        for record in request.sig0() {
+        // disable dnssec until hickory dns fix compile error
+        /*for record in request.sig0() {
             message.add_sig0(record.clone());
-        }
+        }*/
 
         let extensions = message.extensions_mut();
         if let Some(edns) = request.edns() {

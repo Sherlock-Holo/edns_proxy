@@ -7,11 +7,12 @@ use std::net::SocketAddr;
 use clap::Parser;
 use clap::builder::styling;
 use futures_util::{FutureExt, select};
-use hickory_resolver::AsyncResolver;
-use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
-use hickory_resolver::error::ResolveErrorKind;
+use hickory_proto::xfer::Protocol;
+use hickory_resolver::Resolver;
+use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use itertools::Itertools;
-use rustls::{Certificate, PrivateKey};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::signal::unix;
 use tokio::signal::unix::SignalKind;
 use tracing::level_filters::LevelFilter;
@@ -21,7 +22,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Registry, fmt};
 
 use crate::addr::BindAddr;
-use crate::backend::{Backends, HttpsBackend, TlsBackend, UdpBackend};
+use crate::backend::{Backends, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend};
 use crate::config::{BindAddrType, Config, Proxy};
 
 mod addr;
@@ -51,6 +52,7 @@ pub async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
 
     init_log(args.debug);
+    init_tls_provider();
 
     let config = Config::read(&args.config)?;
 
@@ -75,35 +77,52 @@ pub async fn run() -> anyhow::Result<()> {
                 port,
                 bootstrap,
             }) => {
-                let addrs = bootstrap_domain(
-                    &bootstrap,
-                    &tls_name,
-                    port.unwrap_or(config::TlsBackend::DEFAULT_PORT),
-                )
-                .await?;
+                let addrs = bootstrap_domain(&bootstrap, &tls_name, port).await?;
                 let tls_backend = TlsBackend::new(addrs, tls_name)?;
 
                 Backends::from(tls_backend)
             }
 
-            config::Backend::Https(config::HttpsBackend {
+            config::Backend::Udp(config::UdpBackend { addr, timeout }) => {
+                Backends::from(UdpBackend::new(
+                    addr.into_iter().collect(),
+                    timeout.map(|timeout| timeout.into_inner()),
+                ))
+            }
+
+            config::Backend::Https(config::HttpsBasedBackend {
                 host,
+                path,
                 port,
                 bootstrap,
             }) => {
-                let addrs = bootstrap_domain(
-                    &bootstrap,
-                    &host,
-                    port.unwrap_or(config::HttpsBackend::DEFAULT_PORT),
-                )
-                .await?;
-                let https_backend = HttpsBackend::new(addrs, host)?;
+                let addrs = bootstrap_domain(&bootstrap, &host, port).await?;
+                let https_backend = HttpsBackend::new(addrs, host, path)?;
 
                 Backends::from(https_backend)
             }
 
-            config::Backend::Udp(config::UdpBackend { addr }) => {
-                Backends::from(UdpBackend::new(addr.into_iter().collect()))
+            config::Backend::Quic(config::TlsBackend {
+                tls_name,
+                port,
+                bootstrap,
+            }) => {
+                let addrs = bootstrap_domain(&bootstrap, &tls_name, port).await?;
+                let quic_backend = QuicBackend::new(addrs, tls_name)?;
+
+                Backends::from(quic_backend)
+            }
+
+            config::Backend::H3(config::HttpsBasedBackend {
+                host,
+                path,
+                port,
+                bootstrap,
+            }) => {
+                let addrs = bootstrap_domain(&bootstrap, &host, port).await?;
+                let h3_backend = H3Backend::new(addrs, host, path)?;
+
+                Backends::from(h3_backend)
             }
         };
 
@@ -141,10 +160,10 @@ async fn bootstrap_domain(
     for addr in bootstrap_addr {
         resolver_config.add_name_server(NameServerConfig::new(*addr, Protocol::Udp));
     }
-    let async_resolver = AsyncResolver::tokio(resolver_config, ResolverOpts::default());
+    let async_resolver = Resolver::tokio(resolver_config, ResolverOpts::default());
 
     let mut addrs = match async_resolver.ipv4_lookup(domain).await {
-        Err(err) if matches!(err.kind(), ResolveErrorKind::NoRecordsFound { .. }) => HashSet::new(),
+        Err(err) if err.is_no_records_found() => HashSet::new(),
         Err(err) => return Err(err.into()),
 
         Ok(ipv4_lookup) => ipv4_lookup
@@ -154,7 +173,7 @@ async fn bootstrap_domain(
     };
 
     match async_resolver.ipv6_lookup(domain).await {
-        Err(err) if matches!(err.kind(), ResolveErrorKind::NoRecordsFound { .. }) => Ok(addrs),
+        Err(err) if err.is_no_records_found() => Ok(addrs),
         Err(err) => Err(err.into()),
 
         Ok(ipv6_lookup) => {
@@ -183,16 +202,20 @@ fn create_bind_addr(proxy: Proxy) -> anyhow::Result<BindAddr> {
                 .certificate
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("https bind type must set certificate path"))?;
+
             let private_key = proxy
                 .private_key
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("https bind type must set private key path"))?;
+
             let certs = load_certificates_from_pem(cert)?;
             let private_key = load_private_key_from_file(private_key)?;
             BindAddr::Https {
                 addr: proxy.bind_addr,
                 certificate: certs,
                 private_key,
+                domain: proxy.bind_domain.clone(),
+                path: proxy.bind_path.clone(),
                 timeout: proxy.timeout.map(|timeout| timeout.into_inner()),
             }
         }
@@ -288,22 +311,23 @@ fn init_log(debug: bool) {
     subscriber::set_global_default(layered).unwrap();
 }
 
-fn load_certificates_from_pem(path: &str) -> anyhow::Result<Vec<Certificate>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)?;
+fn init_tls_provider() {
+    let provider = rustls::crypto::aws_lc_rs::default_provider();
 
-    Ok(certs.into_iter().map(Certificate).collect())
+    provider
+        .install_default()
+        .expect("install crypto provider should succeed");
 }
 
-fn load_private_key_from_file(path: &str) -> anyhow::Result<PrivateKey> {
+fn load_certificates_from_pem(path: &str) -> anyhow::Result<Vec<CertificateDer<'static>>> {
     let file = File::open(path)?;
     let mut reader = BufReader::new(file);
-    let mut keys = rustls_pemfile::pkcs8_private_keys(&mut reader)?;
 
-    let key = keys
-        .pop()
-        .ok_or_else(|| anyhow::anyhow!("no PKCS8-encoded private key found in {path}"))?;
+    rustls_pemfile::certs(&mut reader)
+        .map(|res| res.map_err(anyhow::Error::from))
+        .try_collect()
+}
 
-    Ok(PrivateKey(key))
+fn load_private_key_from_file(path: &str) -> anyhow::Result<PrivateKeyDer<'static>> {
+    Ok(PrivateKeyDer::from_pem_file(path)?)
 }

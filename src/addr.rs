@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use rustls::{Certificate, PrivateKey};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum BindAddr {
@@ -12,26 +12,29 @@ pub enum BindAddr {
     },
     Https {
         addr: SocketAddr,
-        certificate: Vec<Certificate>,
-        private_key: PrivateKey,
+        certificate: Vec<CertificateDer<'static>>,
+        private_key: PrivateKeyDer<'static>,
+        domain: Option<String>,
+        path: Option<String>,
         timeout: Option<Duration>,
     },
     Tls {
         addr: SocketAddr,
-        certificate: Vec<Certificate>,
-        private_key: PrivateKey,
+        certificate: Vec<CertificateDer<'static>>,
+        private_key: PrivateKeyDer<'static>,
         timeout: Option<Duration>,
     },
     Quic {
         addr: SocketAddr,
-        certificate: Vec<Certificate>,
-        private_key: PrivateKey,
+        certificate: Vec<CertificateDer<'static>>,
+        private_key: PrivateKeyDer<'static>,
         timeout: Option<Duration>,
     },
     H3 {
         addr: SocketAddr,
-        certificate: Vec<Certificate>,
-        private_key: PrivateKey,
+        certificate: Vec<CertificateDer<'static>>,
+        private_key: PrivateKeyDer<'static>,
+        // path: Option<String>,
         timeout: Option<Duration>,
     },
 }

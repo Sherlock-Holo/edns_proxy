@@ -4,17 +4,17 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::Context;
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
 use futures_util::TryStreamExt;
-use hickory_proto::iocompat::AsyncIoTokioAsStd;
 use hickory_proto::op::Message;
+use hickory_proto::runtime::TokioRuntimeProvider;
+use hickory_proto::runtime::iocompat::AsyncIoTokioAsStd;
 use hickory_proto::rustls::tls_stream::TokioTlsClientStream;
 use hickory_proto::rustls::{TlsStream, tls_connect};
 use hickory_proto::xfer::{DnsResponse, SerialMessage};
 use hickory_proto::{BufDnsStreamHandle, DnsStreamHandle};
 use rand::prelude::*;
-use rustls::{Certificate, ClientConfig, RootCertStore};
+use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tracing::{debug, error, instrument};
 
@@ -36,11 +36,10 @@ impl TlsBackend {
             ));
         }
         for cert in certs.certs {
-            root_cert_store.add(&Certificate(cert.to_vec()))?;
+            root_cert_store.add(cert)?;
         }
 
         let client_config = ClientConfig::builder()
-            .with_safe_defaults()
             .with_root_certificates(root_cert_store)
             .with_no_client_auth();
 
@@ -99,18 +98,11 @@ impl Tls {
         message: &Message,
         src: SocketAddr,
     ) -> anyhow::Result<Option<DnsResponse>> {
-        let message_data = message.to_vec().with_context(|| "serial message failed")?;
+        let message_data = message.to_vec()?;
 
-        self.sender
-            .send(SerialMessage::new(message_data, src))
-            .with_context(|| "send message data failed")?;
+        self.sender.send(SerialMessage::new(message_data, src))?;
 
-        let resp = match self
-            .tls_stream
-            .try_next()
-            .await
-            .with_context(|| "receive tls dns response failed")?
-        {
+        let resp = match self.tls_stream.try_next().await? {
             None => {
                 debug!("no more tls dns response for this session");
 
@@ -120,13 +112,9 @@ impl Tls {
             Some(resp) => resp,
         };
 
-        let resp_message = resp
-            .to_message()
-            .with_context(|| "convert tls response to message failed")?;
+        let resp_message = resp.to_message()?;
 
-        Ok(Some(DnsResponse::from_message(resp_message).with_context(
-            || "convert tls dns resp message to dns response failed",
-        )?))
+        Ok(Some(DnsResponse::from_message(resp_message)?))
     }
 }
 
@@ -143,7 +131,7 @@ impl Manager for TlsManager {
 
     #[instrument(level = "debug", err)]
     async fn create(&self) -> Result<Self::Type, Self::Error> {
-        let (fut, sender) = tls_connect::<AsyncIoTokioAsStd<TcpStream>>(
+        let (fut, sender) = tls_connect(
             self.addrs
                 .iter()
                 .copied()
@@ -151,6 +139,7 @@ impl Manager for TlsManager {
                 .expect("addrs must not empty"),
             self.name.clone(),
             self.tls_client_config.clone(),
+            TokioRuntimeProvider::new(),
         );
         let tls_stream = fut.await?;
 
