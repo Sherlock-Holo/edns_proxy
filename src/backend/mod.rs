@@ -5,10 +5,12 @@ use hickory_proto::op::Message;
 use hickory_proto::xfer::DnsResponse;
 
 mod https;
-pub mod tls;
+mod tls;
+mod udp;
 
 pub use https::HttpsBackend;
 pub use tls::TlsBackend;
+pub use udp::UdpBackend;
 
 #[enum_dispatch]
 pub trait Backend {
@@ -18,6 +20,7 @@ pub trait Backend {
 #[enum_dispatch(Backend)]
 #[derive(Debug, Clone)]
 pub enum Backends {
-    TlsBackend,
-    HttpsBackend,
+    Tls(TlsBackend),
+    Https(HttpsBackend),
+    Udp(UdpBackend),
 }

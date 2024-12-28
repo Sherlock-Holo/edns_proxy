@@ -21,7 +21,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Registry, fmt};
 
 use crate::addr::BindAddr;
-use crate::backend::{Backends, HttpsBackend, TlsBackend};
+use crate::backend::{Backends, HttpsBackend, TlsBackend, UdpBackend};
 use crate::config::{BindAddrType, Config, Proxy};
 
 mod addr;
@@ -100,6 +100,10 @@ pub async fn run() -> anyhow::Result<()> {
                 let https_backend = HttpsBackend::new(addrs, host)?;
 
                 Backends::from(https_backend)
+            }
+
+            config::Backend::Udp(config::UdpBackend { addr }) => {
+                Backends::from(UdpBackend::new(addr.into_iter().collect()))
             }
         };
 

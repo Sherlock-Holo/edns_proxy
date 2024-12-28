@@ -20,3 +20,13 @@ proxy:
       host: doh.pub
       bootstrap:
         - 1.0.0.1:53
+
+  - ipv4_prefix: 15
+    ipv6_prefix: 56
+    type: udp
+    bind_addr: 127.0.0.1:5555
+    timeout: 20s
+    backend:
+      type: udp
+      addr:
+        - 1.0.0.1:53

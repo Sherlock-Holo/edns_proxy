@@ -54,7 +54,7 @@ impl HttpsBackend {
 }
 
 impl Backend for HttpsBackend {
-    #[instrument(level = "debug", err)]
+    #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
         for _ in 0..3 {
             let mut obj = match self.pool.get().await {

@@ -48,6 +48,7 @@ pub enum BindAddrType {
 pub enum Backend {
     Tls(TlsBackend),
     Https(HttpsBackend),
+    Udp(UdpBackend),
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -100,4 +101,9 @@ impl Hash for HttpsBackend {
         self.host.hash(state);
         self.port.hash(state);
     }
+}
+
+#[derive(Debug, Deserialize, Clone, Eq, PartialEq, Hash)]
+pub struct UdpBackend {
+    pub addr: Vec<SocketAddr>,
 }

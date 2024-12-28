@@ -56,7 +56,7 @@ impl TlsBackend {
 }
 
 impl Backend for TlsBackend {
-    #[instrument(level = "debug", err)]
+    #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
         for _ in 0..3 {
             let mut obj = match self.pool.get().await {
@@ -77,7 +77,7 @@ impl Backend for TlsBackend {
             }
         }
 
-        Err(anyhow::anyhow!("get dns response failed"))
+        Err(anyhow::anyhow!("get tls dns response failed"))
     }
 }
 
