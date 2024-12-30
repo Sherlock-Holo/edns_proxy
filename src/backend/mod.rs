@@ -29,4 +29,17 @@ pub enum Backends {
     Https(HttpsBackend),
     Quic(QuicBackend),
     H3(H3Backend),
+    #[cfg(test)]
+    Test(TestBackend),
+}
+
+#[cfg(test)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct TestBackend(pub usize);
+
+#[cfg(test)]
+impl Backend for TestBackend {
+    async fn send_request(&self, _: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
+        panic!("just for test")
+    }
 }

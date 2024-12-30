@@ -31,6 +31,7 @@ mod addr;
 mod backend;
 mod config;
 mod proxy;
+mod route;
 
 const STYLES: styling::Styles = styling::Styles::styled()
     .header(styling::AnsiColor::Green.on_default().bold())
