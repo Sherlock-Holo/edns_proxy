@@ -24,25 +24,50 @@ impl Config {
 pub struct Proxy {
     pub ipv4_prefix: u8,
     pub ipv6_prefix: u8,
-    pub r#type: BindAddrType,
+    #[serde(flatten)]
+    pub bind: Bind,
+    pub backend: Backend,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Bind {
+    Udp(UdpBind),
+    Tcp(TcpBind),
+    Tls(TlsBasedBind),
+    Quic(TlsBasedBind),
+    Https(HttpsBasedBind),
+    H3(HttpsBasedBind),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UdpBind {
+    pub bind_addr: SocketAddr,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TcpBind {
+    pub bind_addr: SocketAddr,
+    pub timeout: Option<Serde<Duration>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HttpsBasedBind {
     pub bind_addr: SocketAddr,
     pub bind_domain: Option<String>,
     pub bind_path: Option<String>,
     pub timeout: Option<Serde<Duration>>,
-    pub private_key: Option<String>,
-    pub certificate: Option<String>,
-    pub backend: Backend,
+    pub private_key: String,
+    pub certificate: String,
 }
 
-#[derive(Debug, Deserialize, Ord, PartialOrd, Eq, PartialEq, Copy, Clone, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum BindAddrType {
-    Udp,
-    Tcp,
-    Https,
-    Tls,
-    Quic,
-    H3,
+#[derive(Debug, Deserialize)]
+pub struct TlsBasedBind {
+    pub bind_addr: SocketAddr,
+    pub bind_tls_name: Option<String>,
+    pub timeout: Option<Serde<Duration>>,
+    pub private_key: String,
+    pub certificate: String,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Hash, Clone)]

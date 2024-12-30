@@ -23,7 +23,7 @@ use tracing_subscriber::{Registry, fmt};
 
 use crate::addr::BindAddr;
 use crate::backend::{Backends, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend};
-use crate::config::{BindAddrType, Config, Proxy};
+use crate::config::{Bind, Config, HttpsBasedBind, Proxy, TcpBind, TlsBasedBind, UdpBind};
 
 mod addr;
 mod backend;
@@ -189,91 +189,83 @@ async fn bootstrap_domain(
 }
 
 fn create_bind_addr(proxy: Proxy) -> anyhow::Result<BindAddr> {
-    let bind_addr = match proxy.r#type {
-        BindAddrType::Udp => BindAddr::Udp(proxy.bind_addr),
+    let bind_addr = match proxy.bind {
+        Bind::Udp(UdpBind { bind_addr }) => BindAddr::Udp(bind_addr),
 
-        BindAddrType::Tcp => BindAddr::Tcp {
-            addr: proxy.bind_addr,
-            timeout: proxy.timeout.map(|timeout| timeout.into_inner()),
+        Bind::Tcp(TcpBind { bind_addr, timeout }) => BindAddr::Tcp {
+            addr: bind_addr,
+            timeout: timeout.map(|timeout| timeout.into_inner()),
         },
 
-        BindAddrType::Https => {
-            let cert = proxy
-                .certificate
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("https bind type must set certificate path"))?;
-
-            let private_key = proxy
-                .private_key
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("https bind type must set private key path"))?;
-
-            let certs = load_certificates_from_pem(cert)?;
-            let private_key = load_private_key_from_file(private_key)?;
+        Bind::Https(HttpsBasedBind {
+            bind_addr,
+            bind_domain,
+            bind_path,
+            timeout,
+            private_key,
+            certificate,
+        }) => {
+            let certs = load_certificates_from_pem(&certificate)?;
+            let private_key = load_private_key_from_file(&private_key)?;
             BindAddr::Https {
-                addr: proxy.bind_addr,
+                addr: bind_addr,
                 certificate: certs,
                 private_key,
-                domain: proxy.bind_domain.clone(),
-                path: proxy.bind_path.clone(),
-                timeout: proxy.timeout.map(|timeout| timeout.into_inner()),
+                domain: bind_domain,
+                path: bind_path,
+                timeout: timeout.map(|timeout| timeout.into_inner()),
             }
         }
 
-        BindAddrType::Tls => {
-            let cert = proxy
-                .certificate
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("tls bind type must set certificate path"))?;
-            let private_key = proxy
-                .private_key
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("tls bind type must set private key path"))?;
-            let certs = load_certificates_from_pem(cert)?;
-            let private_key = load_private_key_from_file(private_key)?;
+        Bind::Tls(TlsBasedBind {
+            bind_addr,
+            bind_tls_name: _bind_tls_name,
+            timeout,
+            private_key,
+            certificate,
+        }) => {
+            let certs = load_certificates_from_pem(&certificate)?;
+            let private_key = load_private_key_from_file(&private_key)?;
             BindAddr::Tls {
-                addr: proxy.bind_addr,
+                addr: bind_addr,
                 certificate: certs,
                 private_key,
-                timeout: proxy.timeout.map(|timeout| timeout.into_inner()),
+                timeout: timeout.map(|timeout| timeout.into_inner()),
             }
         }
 
-        BindAddrType::Quic => {
-            let cert = proxy
-                .certificate
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("quic bind type must set certificate path"))?;
-            let private_key = proxy
-                .private_key
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("quic bind type must set private key path"))?;
-            let certs = load_certificates_from_pem(cert)?;
-            let private_key = load_private_key_from_file(private_key)?;
+        Bind::Quic(TlsBasedBind {
+            bind_addr,
+            bind_tls_name: _bind_tls_name,
+            timeout,
+            private_key,
+            certificate,
+        }) => {
+            let certs = load_certificates_from_pem(&certificate)?;
+            let private_key = load_private_key_from_file(&private_key)?;
             BindAddr::Quic {
-                addr: proxy.bind_addr,
+                addr: bind_addr,
                 certificate: certs,
                 private_key,
-                timeout: proxy.timeout.map(|timeout| timeout.into_inner()),
+                timeout: timeout.map(|timeout| timeout.into_inner()),
             }
         }
 
-        BindAddrType::H3 => {
-            let cert = proxy
-                .certificate
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("h3 bind type must set certificate path"))?;
-            let private_key = proxy
-                .private_key
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("h3 bind type must set private key path"))?;
-            let certs = load_certificates_from_pem(cert)?;
-            let private_key = load_private_key_from_file(private_key)?;
+        Bind::H3(HttpsBasedBind {
+            bind_addr,
+            bind_domain: _bind_domain,
+            bind_path: _bind_path,
+            timeout,
+            private_key,
+            certificate,
+        }) => {
+            let certs = load_certificates_from_pem(&certificate)?;
+            let private_key = load_private_key_from_file(&private_key)?;
             BindAddr::H3 {
-                addr: proxy.bind_addr,
+                addr: bind_addr,
                 certificate: certs,
                 private_key,
-                timeout: proxy.timeout.map(|timeout| timeout.into_inner()),
+                timeout: timeout.map(|timeout| timeout.into_inner()),
             }
         }
     };
