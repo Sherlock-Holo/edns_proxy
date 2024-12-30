@@ -23,7 +23,9 @@ use tracing_subscriber::{Registry, fmt};
 
 use crate::addr::BindAddr;
 use crate::backend::{Backends, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend};
-use crate::config::{Bind, Config, HttpsBasedBind, Proxy, TcpBind, TlsBasedBind, UdpBind};
+use crate::config::{
+    BackendDetail, Bind, BootstrapOrAddrs, Config, HttpsBasedBind, TcpBind, TlsBasedBind, UdpBind,
+};
 
 mod addr;
 mod backend;
@@ -56,86 +58,103 @@ pub async fn run() -> anyhow::Result<()> {
 
     let config = Config::read(&args.config)?;
 
-    let proxies = config
-        .proxy
-        .into_iter()
-        .map(|proxy| (proxy.backend.clone(), proxy))
-        .fold(
-            HashMap::<_, Vec<_>>::new(),
-            |mut proxies, (backend, proxy)| {
-                proxies.entry(backend).or_default().push(proxy);
+    let mut backend_group = HashMap::with_capacity(config.backend.len());
+    for backend in config.backend {
+        let name = backend.name;
+        if backend_group.contains_key(&name) {
+            return Err(anyhow::anyhow!("backend '{}' already exists", name));
+        }
 
-                proxies
-            },
-        );
-
-    let mut tasks = Vec::with_capacity(proxies.len());
-    for (backend, proxies) in proxies {
-        let backend = match backend {
-            config::Backend::Tls(config::TlsBackend {
+        let backend = match backend.backend_detail {
+            BackendDetail::Tls(config::TlsBackend {
                 tls_name,
                 port,
-                bootstrap,
+                bootstrap_or_addrs,
             }) => {
-                let addrs = bootstrap_domain(&bootstrap, &tls_name, port).await?;
+                let addrs = match bootstrap_or_addrs {
+                    BootstrapOrAddrs::Bootstrap(bootstrap) => {
+                        bootstrap_domain(&bootstrap, &tls_name, port).await?
+                    }
+                    BootstrapOrAddrs::Addrs(addrs) => addrs,
+                };
+
                 let tls_backend = TlsBackend::new(addrs, tls_name)?;
 
                 Backends::from(tls_backend)
             }
 
-            config::Backend::Udp(config::UdpBackend { addr, timeout }) => {
+            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => {
                 Backends::from(UdpBackend::new(
                     addr.into_iter().collect(),
                     timeout.map(|timeout| timeout.into_inner()),
                 ))
             }
 
-            config::Backend::Https(config::HttpsBasedBackend {
+            BackendDetail::Https(config::HttpsBasedBackend {
                 host,
                 path,
                 port,
-                bootstrap,
+                bootstrap_or_addrs,
             }) => {
-                let addrs = bootstrap_domain(&bootstrap, &host, port).await?;
+                let addrs = match bootstrap_or_addrs {
+                    BootstrapOrAddrs::Bootstrap(bootstrap) => {
+                        bootstrap_domain(&bootstrap, &host, port).await?
+                    }
+                    BootstrapOrAddrs::Addrs(addrs) => addrs,
+                };
+
                 let https_backend = HttpsBackend::new(addrs, host, path)?;
 
                 Backends::from(https_backend)
             }
 
-            config::Backend::Quic(config::TlsBackend {
+            BackendDetail::Quic(config::TlsBackend {
                 tls_name,
                 port,
-                bootstrap,
+                bootstrap_or_addrs,
             }) => {
-                let addrs = bootstrap_domain(&bootstrap, &tls_name, port).await?;
+                let addrs = match bootstrap_or_addrs {
+                    BootstrapOrAddrs::Bootstrap(bootstrap) => {
+                        bootstrap_domain(&bootstrap, &tls_name, port).await?
+                    }
+                    BootstrapOrAddrs::Addrs(addrs) => addrs,
+                };
                 let quic_backend = QuicBackend::new(addrs, tls_name)?;
 
                 Backends::from(quic_backend)
             }
 
-            config::Backend::H3(config::HttpsBasedBackend {
+            BackendDetail::H3(config::HttpsBasedBackend {
                 host,
                 path,
                 port,
-                bootstrap,
+                bootstrap_or_addrs,
             }) => {
-                let addrs = bootstrap_domain(&bootstrap, &host, port).await?;
+                let addrs = match bootstrap_or_addrs {
+                    BootstrapOrAddrs::Bootstrap(bootstrap) => {
+                        bootstrap_domain(&bootstrap, &host, port).await?
+                    }
+                    BootstrapOrAddrs::Addrs(addrs) => addrs,
+                };
                 let h3_backend = H3Backend::new(addrs, host, path)?;
 
                 Backends::from(h3_backend)
             }
         };
 
-        let first_proxy = &proxies[0];
-        let ipv4_prefix = first_proxy.ipv4_prefix;
-        let ipv6_prefix = first_proxy.ipv6_prefix;
+        backend_group.insert(name, backend);
+    }
 
-        let bind_addrs = proxies
-            .into_iter()
-            .map(create_bind_addr)
-            .try_collect::<_, Vec<_>, _>()?;
+    let mut tasks = Vec::with_capacity(config.proxy.len());
+    for proxy in config.proxy {
+        let backend = backend_group
+            .get(&proxy.backend)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
 
-        let task = proxy::start_proxy(bind_addrs, ipv4_prefix, ipv6_prefix, backend).await?;
+        let bind_addr = create_bind_addr(proxy.bind)?;
+        let task =
+            proxy::start_proxy(bind_addr, proxy.ipv4_prefix, proxy.ipv6_prefix, backend).await?;
         tasks.push(task);
     }
 
@@ -188,8 +207,8 @@ async fn bootstrap_domain(
     }
 }
 
-fn create_bind_addr(proxy: Proxy) -> anyhow::Result<BindAddr> {
-    let bind_addr = match proxy.bind {
+fn create_bind_addr(bind: Bind) -> anyhow::Result<BindAddr> {
+    let bind_addr = match bind {
         Bind::Udp(UdpBind { bind_addr }) => BindAddr::Udp(bind_addr),
 
         Bind::Tcp(TcpBind { bind_addr, timeout }) => BindAddr::Tcp {

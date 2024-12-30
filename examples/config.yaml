@@ -4,53 +4,64 @@ proxy:
     type: udp
     bind_addr: 127.0.0.1:5353
     timeout: 20s
-    backend:
-      type: tls
-      tls_name: dot.pub
-      bootstrap:
-        - 1.0.0.1:53
+    backend: dot-pub
 
   - ipv4_prefix: 15
     ipv6_prefix: 56
     type: udp
     bind_addr: 127.0.0.1:5454
     timeout: 20s
-    backend:
-      type: https
-      host: doh.pub
-      path: /dns-query
-      bootstrap:
-        - 1.0.0.1:53
+    backend: doh-pub
 
   - ipv4_prefix: 15
     ipv6_prefix: 56
     type: udp
     bind_addr: 127.0.0.1:5555
     timeout: 20s
-    backend:
-      type: udp
-      addr:
-        - 1.0.0.1:53
+    backend: udp
 
   - ipv4_prefix: 15
     ipv6_prefix: 56
     type: udp
     bind_addr: 127.0.0.1:5656
     timeout: 20s
-    backend:
-      type: h3
-      host: dns.alidns.com
-      path: /dns-query
-      bootstrap:
-        - 1.0.0.1:53
+    backend: h3
 
   - ipv4_prefix: 15
     ipv6_prefix: 56
     type: udp
     bind_addr: 127.0.0.1:5757
     timeout: 20s
-    backend:
-      type: quic
-      tls_name: dns.alidns.com
-      bootstrap:
-        - 1.0.0.1:53
+    backend: quic
+
+backend:
+  - name: dot-pub
+    type: tls
+    tls_name: dot.pub
+    addrs:
+      - 120.53.53.53:53
+
+  - name: doh-pub
+    type: https
+    host: doh.pub
+    path: /dns-query
+    bootstrap:
+      - 1.0.0.1:53
+
+  - name: udp
+    type: udp
+    addr:
+      - 1.0.0.1:53
+
+  - name: h3
+    type: h3
+    host: dns.alidns.com
+    path: /dns-query
+    bootstrap:
+      - 1.0.0.1:53
+
+  - name: quic
+    type: quic
+    tls_name: dns.alidns.com
+    bootstrap:
+      - 1.0.0.1:53

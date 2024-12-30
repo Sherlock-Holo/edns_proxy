@@ -28,7 +28,7 @@ impl ProxyTask {
 }
 
 pub async fn start_proxy(
-    bind_addrs: Vec<BindAddr>,
+    bind_addr: BindAddr,
     ipv4_source_prefix: u8,
     ipv6_source_prefix: u8,
     backend: Backends,
@@ -39,79 +39,77 @@ pub async fn start_proxy(
         ipv6_source_prefix,
     });
 
-    for bind_addr in bind_addrs {
-        match bind_addr {
-            BindAddr::Udp(addr) => {
-                let udp_socket = UdpSocket::bind(addr).await?;
-                server.register_socket(udp_socket);
-            }
+    match bind_addr {
+        BindAddr::Udp(addr) => {
+            let udp_socket = UdpSocket::bind(addr).await?;
+            server.register_socket(udp_socket);
+        }
 
-            BindAddr::Tcp { addr, timeout } => {
-                let tcp_listener = TcpListener::bind(addr).await?;
-                server.register_listener(tcp_listener, timeout.unwrap_or(DEFAULT_TIMEOUT));
-            }
+        BindAddr::Tcp { addr, timeout } => {
+            let tcp_listener = TcpListener::bind(addr).await?;
+            server.register_listener(tcp_listener, timeout.unwrap_or(DEFAULT_TIMEOUT));
+        }
 
-            BindAddr::Https {
-                addr,
-                certificate,
-                private_key,
+        BindAddr::Https {
+            addr,
+            certificate,
+            private_key,
+            domain,
+            path,
+            timeout,
+        } => {
+            let tcp_listener = TcpListener::bind(addr).await?;
+            server.register_https_listener(
+                tcp_listener,
+                timeout.unwrap_or(DEFAULT_TIMEOUT),
+                (certificate, private_key),
                 domain,
-                path,
-                timeout,
-            } => {
-                let tcp_listener = TcpListener::bind(addr).await?;
-                server.register_https_listener(
-                    tcp_listener,
-                    timeout.unwrap_or(DEFAULT_TIMEOUT),
-                    (certificate, private_key),
-                    domain,
-                    path.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
-                )?;
-            }
+                path.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+            )?;
+        }
 
-            BindAddr::Tls {
-                addr,
-                certificate,
-                private_key,
-                timeout,
-            } => {
-                let tcp_listener = TcpListener::bind(addr).await?;
-                server.register_tls_listener(
-                    tcp_listener,
-                    timeout.unwrap_or(DEFAULT_TIMEOUT),
-                    (certificate, private_key),
-                )?;
-            }
+        BindAddr::Tls {
+            addr,
+            certificate,
+            private_key,
+            timeout,
+        } => {
+            let tcp_listener = TcpListener::bind(addr).await?;
+            server.register_tls_listener(
+                tcp_listener,
+                timeout.unwrap_or(DEFAULT_TIMEOUT),
+                (certificate, private_key),
+            )?;
+        }
 
-            BindAddr::Quic {
-                addr,
-                certificate,
-                private_key,
-                timeout,
-            } => {
-                let udp_socket = UdpSocket::bind(addr).await?;
-                server.register_quic_listener(
-                    udp_socket,
-                    timeout.unwrap_or(DEFAULT_TIMEOUT),
-                    (certificate, private_key),
-                    None,
-                )?;
-            }
+        BindAddr::Quic {
+            addr,
+            certificate,
+            private_key,
+            timeout,
+        } => {
+            let udp_socket = UdpSocket::bind(addr).await?;
+            server.register_quic_listener(
+                udp_socket,
+                timeout.unwrap_or(DEFAULT_TIMEOUT),
+                (certificate, private_key),
+                None,
+            )?;
+        }
 
-            BindAddr::H3 {
-                addr,
-                certificate,
-                private_key,
-                timeout,
-            } => {
-                let udp_socket = UdpSocket::bind(addr).await?;
-                server.register_h3_listener(
-                    udp_socket,
-                    timeout.unwrap_or(DEFAULT_TIMEOUT),
-                    (certificate, private_key),
-                    None,
-                )?;
-            }
+        BindAddr::H3 {
+            addr,
+            certificate,
+            private_key,
+            timeout,
+        } => {
+            let udp_socket = UdpSocket::bind(addr).await?;
+            server.register_h3_listener(
+                udp_socket,
+                timeout.unwrap_or(DEFAULT_TIMEOUT),
+                (certificate, private_key),
+                None,
+            )?;
         }
     }
 

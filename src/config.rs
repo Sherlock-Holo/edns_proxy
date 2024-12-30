@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::fs::File;
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -10,6 +9,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub proxy: Vec<Proxy>,
+    pub backend: Vec<Backend>,
 }
 
 impl Config {
@@ -26,7 +26,7 @@ pub struct Proxy {
     pub ipv6_prefix: u8,
     #[serde(flatten)]
     pub bind: Bind,
-    pub backend: Backend,
+    pub backend: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,9 +70,16 @@ pub struct TlsBasedBind {
     pub certificate: String,
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq, Hash, Clone)]
+#[derive(Debug, Deserialize)]
+pub struct Backend {
+    pub name: String,
+    #[serde(flatten)]
+    pub backend_detail: BackendDetail,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum Backend {
+pub enum BackendDetail {
     Tls(TlsBackend),
     Udp(UdpBackend),
     Https(HttpsBasedBackend),
@@ -80,12 +87,20 @@ pub enum Backend {
     Quic(TlsBackend),
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapOrAddrs {
+    Bootstrap(HashSet<SocketAddr>),
+    Addrs(HashSet<SocketAddr>),
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TlsBackend {
     pub tls_name: String,
     #[serde(default = "TlsBackend::default_port")]
     pub port: u16,
-    pub bootstrap: HashSet<SocketAddr>,
+    #[serde(flatten)]
+    pub bootstrap_or_addrs: BootstrapOrAddrs,
 }
 
 impl TlsBackend {
@@ -94,29 +109,15 @@ impl TlsBackend {
     }
 }
 
-impl PartialEq for TlsBackend {
-    fn eq(&self, other: &Self) -> bool {
-        self.tls_name == other.tls_name && self.port == other.port
-    }
-}
-
-impl Eq for TlsBackend {}
-
-impl Hash for TlsBackend {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.tls_name.hash(state);
-        self.port.hash(state);
-    }
-}
-
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize)]
 pub struct HttpsBasedBackend {
     pub host: String,
     #[serde(default = "HttpsBasedBackend::default_path")]
     pub path: String,
     #[serde(default = "HttpsBasedBackend::default_port")]
     pub port: u16,
-    pub bootstrap: HashSet<SocketAddr>,
+    #[serde(flatten)]
+    pub bootstrap_or_addrs: BootstrapOrAddrs,
 }
 
 impl HttpsBasedBackend {
@@ -126,21 +127,6 @@ impl HttpsBasedBackend {
 
     fn default_path() -> String {
         "/dns-query".to_string()
-    }
-}
-
-impl PartialEq for HttpsBasedBackend {
-    fn eq(&self, other: &Self) -> bool {
-        self.host == other.host && self.port == other.port
-    }
-}
-
-impl Eq for HttpsBasedBackend {}
-
-impl Hash for HttpsBasedBackend {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.host.hash(state);
-        self.port.hash(state);
     }
 }
 
