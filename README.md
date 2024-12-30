@@ -11,7 +11,6 @@ EDNS client subnet DNS proxy server
 - [X] bind QUIC
 - [X] bind DoH3
 - [x] UDP backend
-- [X] TCP backend
 - [X] DoH backend
 - [X] DoT backend
 - [X] QUIC backend
