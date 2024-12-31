@@ -40,6 +40,8 @@ proxy:
     bind_addr: 127.0.0.1:5858
     timeout: 20s
     backend: doh-pub
+    cache:
+      capacity: 10
     route:
       - type: dnsmasq
         path: examples/dnsmasq.conf

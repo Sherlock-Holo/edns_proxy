@@ -1,18 +1,21 @@
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use hickory_proto::op::{Edns, Header, Message, ResponseCode};
 use hickory_proto::rr::Record;
 use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
+use hickory_proto::xfer::DnsResponse;
 use hickory_server::ServerFuture;
 use hickory_server::authority::{MessageResponse, MessageResponseBuilder};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use tokio::net::{TcpListener, UdpSocket};
-use tracing::{error, info};
+use tracing::{error, instrument};
 
 use crate::addr::BindAddr;
 use crate::backend::{Backend, Backends};
+use crate::cache::Cache;
 use crate::route::Route;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -34,8 +37,10 @@ pub async fn start_proxy(
     ipv6_source_prefix: u8,
     route: Route,
     default_backend: Backends,
+    cache: Option<NonZeroUsize>,
 ) -> anyhow::Result<ProxyTask> {
     let mut server = ServerFuture::new(DnsHandler {
+        cache: cache.map(Cache::new),
         default_backend,
         route,
         ipv4_source_prefix,
@@ -121,6 +126,7 @@ pub async fn start_proxy(
 
 #[derive(Debug)]
 struct DnsHandler {
+    cache: Option<Cache>,
     default_backend: Backends,
     route: Route,
     ipv4_source_prefix: u8,
@@ -129,30 +135,19 @@ struct DnsHandler {
 
 #[async_trait]
 impl RequestHandler for DnsHandler {
+    #[instrument(skip(response_handle), ret)]
     async fn handle_request<R: ResponseHandler>(
         &self,
         request: &Request,
         response_handle: R,
     ) -> ResponseInfo {
-        let src_addr = request.src();
-        let message = self.extract_message(request, src_addr);
-
-        let backend = match message.query() {
-            None => {
-                info!(?message, "message has no query, use default backend");
-
-                &self.default_backend
-            }
-
-            Some(query) => {
-                let name = query.name().to_string();
-                self.route
-                    .get_backend(&name)
-                    .unwrap_or_else(|| &self.default_backend)
-            }
+        let resp_result = if let Some(resp) = self.try_get_cache_response(request).await {
+            Ok(resp)
+        } else {
+            self.send_request(request).await
         };
 
-        match backend.send_request(message, src_addr).await {
+        match resp_result {
             Err(err) => {
                 error!(%err, "send dns request to backend failed");
 
@@ -182,6 +177,38 @@ impl RequestHandler for DnsHandler {
 }
 
 impl DnsHandler {
+    #[instrument]
+    async fn send_request(&self, request: &Request) -> anyhow::Result<DnsResponse> {
+        let src_addr = request.src();
+        let message = self.extract_message(request, src_addr);
+
+        let backend = self
+            .route
+            .get_backend(&request.query().original().name().to_string())
+            .unwrap_or(&self.default_backend);
+
+        let response = backend.send_request(message, src_addr).await?;
+
+        if let Some(cache) = &self.cache {
+            let src_ip = src_addr.ip();
+            let prefix = match src_ip {
+                IpAddr::V4(_) => self.ipv4_source_prefix,
+                IpAddr::V6(_) => self.ipv6_source_prefix,
+            };
+
+            cache
+                .put_cache_response(
+                    request.query().original().clone(),
+                    src_ip,
+                    prefix,
+                    response.clone(),
+                )
+                .await;
+        }
+
+        Ok(response)
+    }
+
     async fn send_resp<'a, R: ResponseHandler>(
         request: &Request,
         mut response_handle: R,
@@ -243,5 +270,20 @@ impl DnsHandler {
         }
 
         message
+    }
+
+    async fn try_get_cache_response(&self, request: &Request) -> Option<DnsResponse> {
+        let cache = self.cache.as_ref()?;
+
+        let query = request.query().original();
+        let src_ip = request.src().ip();
+        let prefix = match src_ip {
+            IpAddr::V4(_) => self.ipv4_source_prefix,
+            IpAddr::V6(_) => self.ipv6_source_prefix,
+        };
+
+        cache
+            .get_cache_response(query.clone(), src_ip, prefix)
+            .await
     }
 }

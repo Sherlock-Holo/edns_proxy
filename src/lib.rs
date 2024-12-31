@@ -32,6 +32,7 @@ use crate::route::{Route, dnsmasq::DnsmasqExt};
 
 mod addr;
 mod backend;
+mod cache;
 mod config;
 mod proxy;
 mod route;
@@ -180,6 +181,7 @@ pub async fn run() -> anyhow::Result<()> {
             proxy.ipv6_prefix,
             route,
             default_backend,
+            proxy.cache.map(|cache| cache.capacity),
         )
         .await?;
         tasks.push(task);

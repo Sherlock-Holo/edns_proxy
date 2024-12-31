@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use humantime_serde::Serde;
@@ -27,6 +28,7 @@ pub struct Proxy {
     #[serde(flatten)]
     pub bind: Bind,
     pub backend: String,
+    pub cache: Option<Cache>,
     #[serde(default)]
     pub route: Vec<Route>,
 }
@@ -149,4 +151,16 @@ pub struct Route {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RouteType {
     Dnsmasq { path: String },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Cache {
+    #[serde(default = "Cache::default_capacity")]
+    pub capacity: NonZeroUsize,
+}
+
+impl Cache {
+    const fn default_capacity() -> NonZeroUsize {
+        NonZeroUsize::new(100).unwrap()
+    }
 }
