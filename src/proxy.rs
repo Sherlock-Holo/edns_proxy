@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,8 +11,9 @@ use hickory_proto::xfer::DnsResponse;
 use hickory_server::ServerFuture;
 use hickory_server::authority::{MessageResponse, MessageResponseBuilder};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
+use rustls::ServerConfig;
 use tokio::net::{TcpListener, UdpSocket};
-use tracing::{error, instrument};
+use tracing::{error, info, instrument};
 
 use crate::addr::BindAddr;
 use crate::backend::{Backend, Backends};
@@ -19,7 +21,6 @@ use crate::cache::Cache;
 use crate::route::Route;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const DEFAULT_ENDPOINT: &str = "/dns-query";
 
 pub struct ProxyTask {
     server: ServerFuture<DnsHandler>,
@@ -31,6 +32,7 @@ impl ProxyTask {
     }
 }
 
+#[instrument(err)]
 pub async fn start_proxy(
     bind_addr: BindAddr,
     ipv4_source_prefix: u8,
@@ -72,7 +74,7 @@ pub async fn start_proxy(
                 timeout.unwrap_or(DEFAULT_TIMEOUT),
                 (certificate, private_key),
                 domain,
-                path.unwrap_or_else(|| DEFAULT_ENDPOINT.to_string()),
+                path,
             )?;
         }
 
@@ -83,10 +85,15 @@ pub async fn start_proxy(
             timeout,
         } => {
             let tcp_listener = TcpListener::bind(addr).await?;
-            server.register_tls_listener(
+
+            let server_config = ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(certificate, private_key)?;
+
+            server.register_tls_listener_with_tls_config(
                 tcp_listener,
                 timeout.unwrap_or(DEFAULT_TIMEOUT),
-                (certificate, private_key),
+                Arc::new(server_config),
             )?;
         }
 
@@ -120,6 +127,8 @@ pub async fn start_proxy(
             )?;
         }
     }
+
+    info!("proxy starting...");
 
     Ok(ProxyTask { server })
 }

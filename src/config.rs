@@ -59,10 +59,17 @@ pub struct TcpBind {
 pub struct HttpsBasedBind {
     pub bind_addr: SocketAddr,
     pub bind_domain: Option<String>,
-    pub bind_path: Option<String>,
+    #[serde(default = "HttpsBasedBind::default_bind_path")]
+    pub bind_path: String,
     pub timeout: Option<Serde<Duration>>,
     pub private_key: String,
     pub certificate: String,
+}
+
+impl HttpsBasedBind {
+    fn default_bind_path() -> String {
+        "/dns-query".to_string()
+    }
 }
 
 #[derive(Debug, Deserialize)]

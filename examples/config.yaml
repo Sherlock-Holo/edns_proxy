@@ -47,6 +47,26 @@ proxy:
         path: examples/dnsmasq.conf
         backend: dot-pub
 
+  - ipv4_prefix: 15
+    ipv6_prefix: 56
+    type: https
+    bind_domain: test
+    private_key: examples/test.key
+    certificate: examples/test.crt
+    bind_addr: 127.0.0.1:4343
+    timeout: 20s
+    backend: dot-pub
+    
+  - ipv4_prefix: 15
+    ipv6_prefix: 56
+    type: tls
+    bind_tls_name: test
+    private_key: examples/test.key
+    certificate: examples/test.crt
+    bind_addr: 127.0.0.1:8853
+    timeout: 20s
+    backend: doh-pub
+
 backend:
   - name: dot-pub
     type: tls
