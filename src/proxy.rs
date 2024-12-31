@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,10 +9,11 @@ use hickory_server::ServerFuture;
 use hickory_server::authority::{MessageResponse, MessageResponseBuilder};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use tokio::net::{TcpListener, UdpSocket};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::addr::BindAddr;
 use crate::backend::{Backend, Backends};
+use crate::route::Route;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_ENDPOINT: &str = "/dns-query";
@@ -31,10 +32,12 @@ pub async fn start_proxy(
     bind_addr: BindAddr,
     ipv4_source_prefix: u8,
     ipv6_source_prefix: u8,
-    backend: Backends,
+    route: Route,
+    default_backend: Backends,
 ) -> anyhow::Result<ProxyTask> {
     let mut server = ServerFuture::new(DnsHandler {
-        backend,
+        default_backend,
+        route,
         ipv4_source_prefix,
         ipv6_source_prefix,
     });
@@ -118,7 +121,8 @@ pub async fn start_proxy(
 
 #[derive(Debug)]
 struct DnsHandler {
-    backend: Backends,
+    default_backend: Backends,
+    route: Route,
     ipv4_source_prefix: u8,
     ipv6_source_prefix: u8,
 }
@@ -131,43 +135,24 @@ impl RequestHandler for DnsHandler {
         response_handle: R,
     ) -> ResponseInfo {
         let src_addr = request.src();
+        let message = self.extract_message(request, src_addr);
 
-        let mut message = Message::new();
-        message.set_header(*request.header());
-        message.set_id(request.id());
-        message.set_message_type(request.message_type());
-        message.set_op_code(request.op_code());
-        message.add_queries([request.query().original().clone()]);
-        message.answers_mut().extend_from_slice(request.answers());
-        message
-            .name_servers_mut()
-            .extend_from_slice(request.name_servers());
-        message
-            .additionals_mut()
-            .extend_from_slice(request.additionals());
+        let backend = match message.query() {
+            None => {
+                info!(?message, "message has no query, use default backend");
 
-        // disable dnssec until hickory dns fix compile error
-        /*for record in request.sig0() {
-            message.add_sig0(record.clone());
-        }*/
+                &self.default_backend
+            }
 
-        let extensions = message.extensions_mut();
-        if let Some(edns) = request.edns() {
-            *extensions = Some(edns.clone());
-        }
+            Some(query) => {
+                let name = query.name().to_string();
+                self.route
+                    .get_backend(&name)
+                    .unwrap_or_else(|| &self.default_backend)
+            }
+        };
 
-        let opt = extensions.get_or_insert_with(Edns::new).options_mut();
-        if opt.get(EdnsCode::Subnet).is_none() {
-            let src_ip = src_addr.ip();
-            let prefix = match src_ip {
-                IpAddr::V4(_) => self.ipv4_source_prefix,
-                IpAddr::V6(_) => self.ipv6_source_prefix,
-            };
-
-            opt.insert(EdnsOption::Subnet(ClientSubnet::new(src_ip, prefix, 0)));
-        }
-
-        match self.backend.send_request(message, src_addr).await {
+        match backend.send_request(message, src_addr).await {
             Err(err) => {
                 error!(%err, "send dns request to backend failed");
 
@@ -219,5 +204,44 @@ impl DnsHandler {
 
                 ResponseInfo::from(header)
             })
+    }
+
+    fn extract_message(&self, request: &Request, src_addr: SocketAddr) -> Message {
+        let mut message = Message::new();
+        message.set_header(*request.header());
+        message.set_id(request.id());
+        message.set_message_type(request.message_type());
+        message.set_op_code(request.op_code());
+        message.add_queries([request.query().original().clone()]);
+        message.answers_mut().extend_from_slice(request.answers());
+        message
+            .name_servers_mut()
+            .extend_from_slice(request.name_servers());
+        message
+            .additionals_mut()
+            .extend_from_slice(request.additionals());
+
+        // disable dnssec until hickory dns fix compile error
+        /*for record in request.sig0() {
+            message.add_sig0(record.clone());
+        }*/
+
+        let extensions = message.extensions_mut();
+        if let Some(edns) = request.edns() {
+            *extensions = Some(edns.clone());
+        }
+
+        let opt = extensions.get_or_insert_with(Edns::new).options_mut();
+        if opt.get(EdnsCode::Subnet).is_none() {
+            let src_ip = src_addr.ip();
+            let prefix = match src_ip {
+                IpAddr::V4(_) => self.ipv4_source_prefix,
+                IpAddr::V6(_) => self.ipv6_source_prefix,
+            };
+
+            opt.insert(EdnsOption::Subnet(ClientSubnet::new(src_ip, prefix, 0)));
+        }
+
+        message
     }
 }

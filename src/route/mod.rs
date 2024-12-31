@@ -1,3 +1,5 @@
+pub mod dnsmasq;
+
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 

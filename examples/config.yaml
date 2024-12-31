@@ -34,12 +34,23 @@ proxy:
     timeout: 20s
     backend: quic
 
+  - ipv4_prefix: 15
+    ipv6_prefix: 56
+    type: udp
+    bind_addr: 127.0.0.1:5858
+    timeout: 20s
+    backend: doh-pub
+    route:
+      - type: dnsmasq
+        path: examples/dnsmasq.conf
+        backend: dot-pub
+
 backend:
   - name: dot-pub
     type: tls
     tls_name: dot.pub
     addrs:
-      - 120.53.53.53:53
+      - 120.53.53.53:853
 
   - name: doh-pub
     type: https

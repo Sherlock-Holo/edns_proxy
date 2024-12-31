@@ -27,6 +27,8 @@ pub struct Proxy {
     #[serde(flatten)]
     pub bind: Bind,
     pub backend: String,
+    #[serde(default)]
+    pub route: Vec<Route>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,4 +136,17 @@ impl HttpsBasedBackend {
 pub struct UdpBackend {
     pub addr: Vec<SocketAddr>,
     pub timeout: Option<Serde<Duration>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Route {
+    #[serde(flatten)]
+    pub route_type: RouteType,
+    pub backend: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RouteType {
+    Dnsmasq { path: String },
 }

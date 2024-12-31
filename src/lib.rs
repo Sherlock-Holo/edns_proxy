@@ -24,8 +24,10 @@ use tracing_subscriber::{Registry, fmt};
 use crate::addr::BindAddr;
 use crate::backend::{Backends, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend};
 use crate::config::{
-    BackendDetail, Bind, BootstrapOrAddrs, Config, HttpsBasedBind, TcpBind, TlsBasedBind, UdpBind,
+    BackendDetail, Bind, BootstrapOrAddrs, Config, HttpsBasedBind, RouteType, TcpBind,
+    TlsBasedBind, UdpBind,
 };
+use crate::route::{Route, dnsmasq::DnsmasqExt};
 
 mod addr;
 mod backend;
@@ -148,14 +150,37 @@ pub async fn run() -> anyhow::Result<()> {
 
     let mut tasks = Vec::with_capacity(config.proxy.len());
     for proxy in config.proxy {
-        let backend = backend_group
+        let default_backend = backend_group
             .get(&proxy.backend)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
 
         let bind_addr = create_bind_addr(proxy.bind)?;
-        let task =
-            proxy::start_proxy(bind_addr, proxy.ipv4_prefix, proxy.ipv6_prefix, backend).await?;
+
+        let mut route = Route::default();
+        for route_config in proxy.route {
+            let backend = backend_group
+                .get(&route_config.backend)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", route_config.backend))?;
+
+            match route_config.route_type {
+                RouteType::Dnsmasq { path } => {
+                    let file = File::open(path)
+                        .inspect_err(|err| error!(%err, "open dnsmasq file failed"))?;
+                    route.import_from_dnsmasq(file, backend)?;
+                }
+            }
+        }
+
+        let task = proxy::start_proxy(
+            bind_addr,
+            proxy.ipv4_prefix,
+            proxy.ipv6_prefix,
+            route,
+            default_backend,
+        )
+        .await?;
         tasks.push(task);
     }
 
