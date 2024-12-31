@@ -17,6 +17,7 @@ use tokio::signal::unix;
 use tokio::signal::unix::SignalKind;
 use tracing::level_filters::LevelFilter;
 use tracing::{error, instrument, subscriber};
+use tracing_log::LogTracer;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Registry, fmt};
@@ -342,10 +343,12 @@ fn init_log(debug: bool) {
         LevelFilter::INFO
     };
 
-    let targets = Targets::new().with_default(LevelFilter::DEBUG);
+    let targets = Targets::new().with_default(LevelFilter::TRACE);
     let layered = Registry::default().with(targets).with(layer).with(level);
 
     subscriber::set_global_default(layered).unwrap();
+
+    LogTracer::init().unwrap();
 }
 
 fn init_tls_provider() {

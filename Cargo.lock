@@ -412,6 +412,7 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
 ]
 

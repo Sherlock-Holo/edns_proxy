@@ -17,11 +17,12 @@ hickory-server = { version = "0.25.0-alpha.4", features = ["dns-over-h3", "dns-o
 humantime-serde = "1.1.1"
 itertools = "0.13.0"
 rand = "0.8.5"
-rustls = "0.23.19"
+rustls = { version = "0.23.19" }
 rustls-native-certs = "0.8.1"
 rustls-pemfile = "2.2.0"
 serde = { version = "1.0.215", features = ["derive"] }
 serde_yaml = "0.9"
 tokio = { version = "1.42.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tracing = "0.1.41"
+tracing-log = "0.2.0"
 tracing-subscriber = "0.3.19"
