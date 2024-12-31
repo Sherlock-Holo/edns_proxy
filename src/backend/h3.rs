@@ -1,22 +1,25 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
-use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
 use futures_util::TryStreamExt;
+use futures_util::lock::Mutex;
 use hickory_proto::h3::{H3ClientStream, H3ClientStreamBuilder};
 use hickory_proto::op::Message;
 use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse};
 use rand::prelude::IteratorRandom;
 use rand::thread_rng;
 use rustls::{ClientConfig, RootCertStore};
+use tokio::time::timeout;
 use tracing::{error, instrument};
 
 use crate::backend::Backend;
 
 #[derive(Debug, Clone)]
 pub struct H3Backend {
-    pool: Pool<H3Manager>,
+    inner: Arc<Inner>,
 }
 
 impl H3Backend {
@@ -44,15 +47,15 @@ impl H3Backend {
         let mut builder = H3ClientStreamBuilder::default();
         builder.crypto_config(client_config);
 
-        let pool = Pool::builder(H3Manager {
-            addrs,
-            host,
-            query_path,
-            builder,
+        Ok(Self {
+            inner: Arc::new(Inner {
+                addrs,
+                host,
+                query_path,
+                builder,
+                using_h3_client_stream: Default::default(),
+            }),
         })
-        .build()?;
-
-        Ok(Self { pool })
     }
 }
 
@@ -60,20 +63,25 @@ impl Backend for H3Backend {
     #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
         for _ in 0..3 {
-            let mut obj = match self.pool.get().await {
+            let mut h3_client_stream = match self.inner.create().await {
                 Err(err) => {
                     error!(%err, "get h3 session failed");
 
                     continue;
                 }
 
-                Ok(obj) => obj,
+                Ok(h3_client_stream) => h3_client_stream,
             };
 
-            if let Ok(Some(resp)) = obj.send_to_h3(message.clone()).await {
+            let mut dns_request_options = DnsRequestOptions::default();
+            dns_request_options.use_edns = true;
+            let mut dns_response_stream = h3_client_stream
+                .send_message(DnsRequest::new(message.clone(), dns_request_options));
+
+            if let Ok(Some(resp)) = dns_response_stream.try_next().await {
                 return Ok(resp);
             } else {
-                let _ = Object::take(obj);
+                h3_client_stream.shutdown();
             }
         }
 
@@ -81,56 +89,67 @@ impl Backend for H3Backend {
     }
 }
 
-struct H3 {
-    h3_client_stream: H3ClientStream,
-}
-
-impl Debug for H3 {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("H3")
-            .field("h3_client_stream", &self.h3_client_stream.to_string())
-            .finish()
-    }
-}
-
-impl H3 {
-    #[instrument(level = "debug", ret, err)]
-    async fn send_to_h3(&mut self, message: Message) -> anyhow::Result<Option<DnsResponse>> {
-        let mut dns_request_options = DnsRequestOptions::default();
-        dns_request_options.use_edns = true;
-        let mut dns_response_stream = self
-            .h3_client_stream
-            .send_message(DnsRequest::new(message, dns_request_options));
-
-        Ok(dns_response_stream.try_next().await.inspect_err(|_| {
-            // drop the incorrect state h3 session
-            self.h3_client_stream.shutdown();
-        })?)
-    }
-}
-
-struct H3Manager {
+struct Inner {
     addrs: HashSet<SocketAddr>,
     host: String,
     query_path: String,
     builder: H3ClientStreamBuilder,
+    using_h3_client_stream: Mutex<Option<H3ClientStream>>,
 }
 
-impl Debug for H3Manager {
+impl Debug for Inner {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("H3Manager")
+        f.debug_struct("Inner")
             .field("addrs", &self.addrs)
             .field("host", &self.host)
+            .field("using_h3_client_stream", &self.using_h3_client_stream)
             .finish_non_exhaustive()
     }
 }
 
-impl Manager for H3Manager {
-    type Type = H3;
-    type Error = anyhow::Error;
+impl Inner {
+    #[instrument(level = "debug", err)]
+    async fn create(&self) -> anyhow::Result<H3ClientStream> {
+        const LOCK_TIMEOUT: Duration = Duration::from_millis(300);
+
+        let h3_client_stream = match timeout(LOCK_TIMEOUT, async {
+            let mut using_h3_client_stream = self.using_h3_client_stream.lock().await;
+            let using_h3_client_stream_mut = match &mut *using_h3_client_stream {
+                None => {
+                    let h3_client_stream = self.create_new_h3_client_stream().await?;
+                    *using_h3_client_stream = Some(h3_client_stream.clone());
+
+                    return Ok(h3_client_stream);
+                }
+
+                Some(using_h3_client_stream) => using_h3_client_stream,
+            };
+
+            match using_h3_client_stream_mut.try_next().await {
+                Err(_) => {
+                    *using_h3_client_stream = None;
+                    let h3_client_stream = self.create_new_h3_client_stream().await?;
+                    *using_h3_client_stream = Some(h3_client_stream.clone());
+
+                    Ok(h3_client_stream)
+                }
+
+                Ok(None) => return self.create_new_h3_client_stream().await,
+                Ok(Some(_)) => Ok(using_h3_client_stream_mut.clone()),
+            }
+        })
+        .await
+        {
+            Err(_) => self.create_new_h3_client_stream().await?,
+            Ok(Err(err)) => return Err(err),
+            Ok(Ok(h3_client_stream)) => h3_client_stream,
+        };
+
+        Ok(h3_client_stream)
+    }
 
     #[instrument(level = "debug", err)]
-    async fn create(&self) -> Result<Self::Type, Self::Error> {
+    async fn create_new_h3_client_stream(&self) -> anyhow::Result<H3ClientStream> {
         let addr = self
             .addrs
             .iter()
@@ -138,20 +157,17 @@ impl Manager for H3Manager {
             .choose(&mut thread_rng())
             .expect("addrs must not empty");
 
-        let h3_client_stream = self
+        let mut h3_client_stream = self
             .builder
             .clone()
             .build(addr, self.host.clone(), self.query_path.clone())
             .await?;
 
-        Ok(H3 { h3_client_stream })
-    }
+        h3_client_stream
+            .try_next()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("h3 stream connected but closed immediately"))?;
 
-    async fn recycle(
-        &self,
-        _obj: &mut Self::Type,
-        _metrics: &Metrics,
-    ) -> RecycleResult<Self::Error> {
-        Ok(())
+        Ok(h3_client_stream)
     }
 }
