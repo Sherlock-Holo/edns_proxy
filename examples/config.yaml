@@ -47,6 +47,10 @@ proxy:
         path: examples/dnsmasq.conf
         backend: dot-pub
 
+      - type: normal
+        path: examples/normal.conf
+        backend: h3
+
   - ipv4_prefix: 15
     ipv6_prefix: 56
     type: https
@@ -71,7 +75,7 @@ backend:
   - name: dot-pub
     type: tls
     tls_name: dot.pub
-    addrs:
+    addr:
       - 120.53.53.53:853
 
   - name: doh-pub

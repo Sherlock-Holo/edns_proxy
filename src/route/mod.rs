@@ -2,14 +2,21 @@ pub mod dnsmasq;
 
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
+use std::io::{BufRead, BufReader, Read};
 
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::backend::Backends;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Route {
     nodes: BTreeMap<String, Node>,
+}
+
+impl Debug for Route {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Route").finish_non_exhaustive()
+    }
 }
 
 struct Node {
@@ -38,6 +45,25 @@ impl Node {
 }
 
 impl Route {
+    pub fn import<R: Read>(&mut self, reader: R, backend: Backends) -> anyhow::Result<()> {
+        let lines = BufReader::new(reader).lines();
+
+        for line in lines {
+            let line = line?;
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if line.starts_with('#') {
+                continue;
+            }
+
+            self.insert(line.to_string(), backend.clone());
+        }
+
+        Ok(())
+    }
+
     pub fn insert(&mut self, domain: String, backend: Backends) {
         let names = domain.split('.').rev().filter(|s| !s.is_empty());
         let children = &mut self.nodes;
@@ -85,9 +111,15 @@ impl Route {
     #[instrument(ret)]
     pub fn get_backend(&self, domain: &str) -> Option<&Backends> {
         let mut names = domain.split('.').rev().filter(|s| !s.is_empty());
-        let root = names
-            .next()
-            .expect("split domain first name should always exist");
+        let root = match names.next() {
+            None => {
+                warn!(domain, "split domain first name should always exist");
+
+                return None;
+            }
+
+            Some(root) => root,
+        };
         let mut node = self.nodes.get(root)?;
 
         for name in names {

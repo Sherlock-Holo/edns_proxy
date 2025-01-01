@@ -102,7 +102,7 @@ pub enum BackendDetail {
 #[serde(rename_all = "snake_case")]
 pub enum BootstrapOrAddrs {
     Bootstrap(HashSet<SocketAddr>),
-    Addrs(HashSet<SocketAddr>),
+    Addr(HashSet<SocketAddr>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -157,6 +157,7 @@ pub struct Route {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RouteType {
+    Normal { path: String },
     Dnsmasq { path: String },
 }
 

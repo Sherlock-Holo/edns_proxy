@@ -80,7 +80,7 @@ pub async fn run() -> anyhow::Result<()> {
                     BootstrapOrAddrs::Bootstrap(bootstrap) => {
                         bootstrap_domain(&bootstrap, &tls_name, port).await?
                     }
-                    BootstrapOrAddrs::Addrs(addrs) => addrs,
+                    BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
 
                 let tls_backend = TlsBackend::new(addrs, tls_name)?;
@@ -105,7 +105,7 @@ pub async fn run() -> anyhow::Result<()> {
                     BootstrapOrAddrs::Bootstrap(bootstrap) => {
                         bootstrap_domain(&bootstrap, &host, port).await?
                     }
-                    BootstrapOrAddrs::Addrs(addrs) => addrs,
+                    BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
 
                 let https_backend = HttpsBackend::new(addrs, host, path)?;
@@ -122,7 +122,7 @@ pub async fn run() -> anyhow::Result<()> {
                     BootstrapOrAddrs::Bootstrap(bootstrap) => {
                         bootstrap_domain(&bootstrap, &tls_name, port).await?
                     }
-                    BootstrapOrAddrs::Addrs(addrs) => addrs,
+                    BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
                 let quic_backend = QuicBackend::new(addrs, tls_name)?;
 
@@ -139,7 +139,7 @@ pub async fn run() -> anyhow::Result<()> {
                     BootstrapOrAddrs::Bootstrap(bootstrap) => {
                         bootstrap_domain(&bootstrap, &host, port).await?
                     }
-                    BootstrapOrAddrs::Addrs(addrs) => addrs,
+                    BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
                 let h3_backend = H3Backend::new(addrs, host, path)?;
 
@@ -167,6 +167,12 @@ pub async fn run() -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", route_config.backend))?;
 
             match route_config.route_type {
+                RouteType::Normal { path } => {
+                    let file = File::open(path)
+                        .inspect_err(|err| error!(%err, "open normal file failed"))?;
+                    route.import(file, backend)?;
+                }
+
                 RouteType::Dnsmasq { path } => {
                     let file = File::open(path)
                         .inspect_err(|err| error!(%err, "open dnsmasq file failed"))?;

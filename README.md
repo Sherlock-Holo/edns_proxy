@@ -26,3 +26,4 @@ EDNS client subnet DNS proxy server
 - [x] Cache
 - [X] Route based backend choice
   - [x] dnsmasq rule support
+  - [x] normal domain list support
