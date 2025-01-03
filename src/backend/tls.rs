@@ -4,6 +4,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
 use futures_util::TryStreamExt;
 use hickory_proto::op::Message;
@@ -54,6 +55,7 @@ impl TlsBackend {
     }
 }
 
+#[async_trait]
 impl Backend for TlsBackend {
     #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {

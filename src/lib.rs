@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io;
 use std::io::BufReader;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use clap::Parser;
 use clap::builder::styling;
@@ -23,7 +24,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Registry, fmt};
 
 use crate::addr::BindAddr;
-use crate::backend::{Backends, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend};
+use crate::backend::{Backend, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend};
 use crate::config::{
     BackendDetail, Bind, BootstrapOrAddrs, Config, HttpsBasedBind, RouteType, TcpBind,
     TlsBasedBind, UdpBind,
@@ -34,6 +35,7 @@ mod addr;
 mod backend;
 mod cache;
 mod config;
+mod filter;
 mod proxy;
 mod route;
 
@@ -70,7 +72,7 @@ pub async fn run() -> anyhow::Result<()> {
             return Err(anyhow::anyhow!("backend '{}' already exists", name));
         }
 
-        let backend = match backend.backend_detail {
+        let backend: Arc<dyn Backend + Send + Sync> = match backend.backend_detail {
             BackendDetail::Tls(config::TlsBackend {
                 tls_name,
                 port,
@@ -85,15 +87,13 @@ pub async fn run() -> anyhow::Result<()> {
 
                 let tls_backend = TlsBackend::new(addrs, tls_name)?;
 
-                Backends::from(tls_backend)
+                Arc::new(tls_backend)
             }
 
-            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => {
-                Backends::from(UdpBackend::new(
-                    addr.into_iter().collect(),
-                    timeout.map(|timeout| timeout.into_inner()),
-                ))
-            }
+            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Arc::new(UdpBackend::new(
+                addr.into_iter().collect(),
+                timeout.map(|timeout| timeout.into_inner()),
+            )),
 
             BackendDetail::Https(config::HttpsBasedBackend {
                 host,
@@ -110,7 +110,7 @@ pub async fn run() -> anyhow::Result<()> {
 
                 let https_backend = HttpsBackend::new(addrs, host, path)?;
 
-                Backends::from(https_backend)
+                Arc::new(https_backend)
             }
 
             BackendDetail::Quic(config::TlsBackend {
@@ -126,7 +126,7 @@ pub async fn run() -> anyhow::Result<()> {
                 };
                 let quic_backend = QuicBackend::new(addrs, tls_name)?;
 
-                Backends::from(quic_backend)
+                Arc::new(quic_backend)
             }
 
             BackendDetail::H3(config::HttpsBasedBackend {
@@ -143,7 +143,7 @@ pub async fn run() -> anyhow::Result<()> {
                 };
                 let h3_backend = H3Backend::new(addrs, host, path)?;
 
-                Backends::from(h3_backend)
+                Arc::new(h3_backend)
             }
         };
 
@@ -153,9 +153,9 @@ pub async fn run() -> anyhow::Result<()> {
     let mut tasks = Vec::with_capacity(config.proxy.len());
     for proxy in config.proxy {
         let default_backend = backend_group
-            .get(&proxy.backend)
+            .get(&proxy.default_backend)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
+            .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.default_backend))?;
 
         let bind_addr = create_bind_addr(proxy.bind)?;
 

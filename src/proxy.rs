@@ -1,12 +1,11 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use hickory_proto::op::{Edns, Header, Message, ResponseCode};
+use hickory_proto::op::{Header, Message, ResponseCode};
 use hickory_proto::rr::Record;
-use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
 use hickory_proto::xfer::DnsResponse;
 use hickory_server::ServerFuture;
 use hickory_server::authority::{MessageResponse, MessageResponseBuilder};
@@ -16,7 +15,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tracing::{error, info, instrument};
 
 use crate::addr::BindAddr;
-use crate::backend::{Backend, Backends};
+use crate::backend::Backend;
 use crate::cache::Cache;
 use crate::route::Route;
 
@@ -33,20 +32,16 @@ impl ProxyTask {
 }
 
 #[instrument(err)]
-pub async fn start_proxy(
+pub async fn start_proxy<B: Backend + Send + Sync + 'static>(
     bind_addr: BindAddr,
-    ipv4_source_prefix: u8,
-    ipv6_source_prefix: u8,
     route: Route,
-    default_backend: Backends,
+    default_backend: B,
     cache: Option<NonZeroUsize>,
 ) -> anyhow::Result<ProxyTask> {
     let mut server = ServerFuture::new(DnsHandler {
         cache: cache.map(Cache::new),
-        default_backend,
+        default_backend: Box::new(default_backend),
         route,
-        ipv4_source_prefix,
-        ipv6_source_prefix,
     });
 
     match bind_addr {
@@ -136,10 +131,8 @@ pub async fn start_proxy(
 #[derive(Debug)]
 struct DnsHandler {
     cache: Option<Cache>,
-    default_backend: Backends,
+    default_backend: Box<dyn Backend + Send + Sync>,
     route: Route,
-    ipv4_source_prefix: u8,
-    ipv6_source_prefix: u8,
 }
 
 #[async_trait]
@@ -189,12 +182,12 @@ impl DnsHandler {
     #[instrument]
     async fn send_request(&self, request: &Request) -> anyhow::Result<DnsResponse> {
         let src_addr = request.src();
-        let message = self.extract_message(request, src_addr);
+        let message = self.extract_message(request);
 
         let backend = self
             .route
             .get_backend(&request.query().original().name().to_string())
-            .unwrap_or(&self.default_backend);
+            .unwrap_or(self.default_backend.as_ref());
 
         let response = backend.send_request(message, src_addr).await?;
 
@@ -242,7 +235,7 @@ impl DnsHandler {
             })
     }
 
-    fn extract_message(&self, request: &Request, src_addr: SocketAddr) -> Message {
+    fn extract_message(&self, request: &Request) -> Message {
         let mut message = Message::new();
         message.set_header(*request.header());
         message.set_id(request.id());
@@ -261,22 +254,6 @@ impl DnsHandler {
         /*for record in request.sig0() {
             message.add_sig0(record.clone());
         }*/
-
-        let extensions = message.extensions_mut();
-        if let Some(edns) = request.edns() {
-            *extensions = Some(edns.clone());
-        }
-
-        let opt = extensions.get_or_insert_with(Edns::new).options_mut();
-        if opt.get(EdnsCode::Subnet).is_none() {
-            let src_ip = src_addr.ip();
-            let prefix = match src_ip {
-                IpAddr::V4(_) => self.ipv4_source_prefix,
-                IpAddr::V6(_) => self.ipv6_source_prefix,
-            };
-
-            opt.insert(EdnsOption::Subnet(ClientSubnet::new(src_ip, prefix, 0)));
-        }
 
         message
     }

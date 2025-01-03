@@ -23,11 +23,13 @@ impl Config {
 
 #[derive(Debug, Deserialize)]
 pub struct Proxy {
-    pub ipv4_prefix: u8,
-    pub ipv6_prefix: u8,
+    pub ipv4_prefix: Option<u8>,
+    pub ipv6_prefix: Option<u8>,
     #[serde(flatten)]
     pub bind: Bind,
-    pub backend: String,
+    pub default_backend: String,
+    #[serde(default)]
+    pub default_filter: Vec<Filter>,
     pub cache: Option<Cache>,
     #[serde(default)]
     pub route: Vec<Route>,
@@ -152,6 +154,8 @@ pub struct Route {
     #[serde(flatten)]
     pub route_type: RouteType,
     pub backend: String,
+    #[serde(default)]
+    pub filter: Vec<Filter>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,4 +175,13 @@ impl Cache {
     const fn default_capacity() -> NonZeroUsize {
         NonZeroUsize::new(100).unwrap()
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Filter {
+    EdnsClientSubnet {
+        ipv4_prefix: Option<u8>,
+        ipv6_prefix: Option<u8>,
+    },
 }

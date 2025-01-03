@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use hickory_proto::op::Message;
 use hickory_proto::runtime::TokioRuntimeProvider;
@@ -25,6 +26,7 @@ impl UdpBackend {
     }
 }
 
+#[async_trait]
 impl Backend for UdpBackend {
     #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
