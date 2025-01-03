@@ -84,6 +84,8 @@ pub struct TlsBasedBind {
 #[derive(Debug, Deserialize)]
 pub struct Backend {
     pub name: String,
+    #[serde(default)]
+    pub clear_ecs: bool,
     #[serde(flatten)]
     pub backend_detail: BackendDetail,
 }

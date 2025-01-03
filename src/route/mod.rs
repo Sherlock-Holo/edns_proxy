@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Read};
 
 use tracing::{instrument, warn};
 
-use crate::backend::Backends;
+use crate::backend::ExtensionBackend;
 
 #[derive(Default)]
 pub struct Route {
@@ -21,7 +21,7 @@ impl Debug for Route {
 
 struct Node {
     name: String,
-    backend: Option<Backends>,
+    backend: Option<ExtensionBackend>,
     children: BTreeMap<String, Node>,
 }
 
@@ -45,7 +45,7 @@ impl Node {
 }
 
 impl Route {
-    pub fn import<R: Read>(&mut self, reader: R, backend: Backends) -> anyhow::Result<()> {
+    pub fn import<R: Read>(&mut self, reader: R, backend: ExtensionBackend) -> anyhow::Result<()> {
         let lines = BufReader::new(reader).lines();
 
         for line in lines {
@@ -64,7 +64,7 @@ impl Route {
         Ok(())
     }
 
-    pub fn insert(&mut self, domain: String, backend: Backends) {
+    pub fn insert(&mut self, domain: String, backend: ExtensionBackend) {
         let names = domain.split('.').rev().filter(|s| !s.is_empty());
         let children = &mut self.nodes;
 
@@ -74,8 +74,8 @@ impl Route {
     fn insert_inner<'a, I: Iterator<Item = &'a str>>(
         mut names: I,
         children: &mut BTreeMap<String, Node>,
-        backend: Backends,
-    ) -> Option<Backends> {
+        backend: ExtensionBackend,
+    ) -> Option<ExtensionBackend> {
         match names.next() {
             None => Some(backend),
 
@@ -109,7 +109,7 @@ impl Route {
     }
 
     #[instrument(ret)]
-    pub fn get_backend(&self, domain: &str) -> Option<&Backends> {
+    pub fn get_backend(&self, domain: &str) -> Option<&ExtensionBackend> {
         let mut names = domain.split('.').rev().filter(|s| !s.is_empty());
         let root = match names.next() {
             None => {
@@ -139,33 +139,39 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::TestBackend;
+    use crate::backend::{Backends, TestBackend};
 
     #[test]
     fn insert() {
         let mut route = Route::default();
 
-        route.insert("www.example.com".to_string(), TestBackend(1).into());
+        route.insert(
+            "www.example.com".to_string(),
+            ExtensionBackend::new(TestBackend(1).into(), false),
+        );
     }
 
     #[test]
     fn get() {
         let mut route = Route::default();
 
-        route.insert("example.com".to_string(), TestBackend(1).into());
+        route.insert(
+            "example.com".to_string(),
+            ExtensionBackend::new(TestBackend(1).into(), false),
+        );
 
         assert!(matches!(
-            route.get_backend("example.com").unwrap(),
+            route.get_backend("example.com").unwrap().backend,
             Backends::Test(TestBackend(1))
         ));
 
         assert!(matches!(
-            route.get_backend("www.example.com").unwrap(),
+            route.get_backend("www.example.com").unwrap().backend,
             Backends::Test(TestBackend(1))
         ));
 
         assert!(matches!(
-            route.get_backend("www.test.example.com").unwrap(),
+            route.get_backend("www.test.example.com").unwrap().backend,
             Backends::Test(TestBackend(1))
         ));
     }
@@ -174,7 +180,10 @@ mod tests {
     fn get_not_found() {
         let mut route = Route::default();
 
-        route.insert("example.io".to_string(), TestBackend(1).into());
+        route.insert(
+            "example.io".to_string(),
+            ExtensionBackend::new(TestBackend(1).into(), false),
+        );
 
         assert!(route.get_backend("example.com").is_none());
         assert!(route.get_backend("io").is_none());
@@ -184,36 +193,42 @@ mod tests {
     fn multi() {
         let mut route = Route::default();
 
-        route.insert("example.com".to_string(), TestBackend(1).into());
-        route.insert("github.com".to_string(), TestBackend(2).into());
+        route.insert(
+            "example.com".to_string(),
+            ExtensionBackend::new(TestBackend(1).into(), false),
+        );
+        route.insert(
+            "github.com".to_string(),
+            ExtensionBackend::new(TestBackend(2).into(), false),
+        );
 
         assert!(matches!(
-            route.get_backend("example.com").unwrap(),
+            route.get_backend("example.com").unwrap().backend,
             Backends::Test(TestBackend(1))
         ));
 
         assert!(matches!(
-            route.get_backend("www.example.com").unwrap(),
+            route.get_backend("www.example.com").unwrap().backend,
             Backends::Test(TestBackend(1))
         ));
 
         assert!(matches!(
-            route.get_backend("www.test.example.com").unwrap(),
+            route.get_backend("www.test.example.com").unwrap().backend,
             Backends::Test(TestBackend(1))
         ));
 
         assert!(matches!(
-            route.get_backend("github.com").unwrap(),
+            route.get_backend("github.com").unwrap().backend,
             Backends::Test(TestBackend(2))
         ));
 
         assert!(matches!(
-            route.get_backend("www.github.com").unwrap(),
+            route.get_backend("www.github.com").unwrap().backend,
             Backends::Test(TestBackend(2))
         ));
 
         assert!(matches!(
-            route.get_backend("www.test.github.com").unwrap(),
+            route.get_backend("www.test.github.com").unwrap().backend,
             Backends::Test(TestBackend(2))
         ));
     }

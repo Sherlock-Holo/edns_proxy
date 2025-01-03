@@ -16,7 +16,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tracing::{error, info, instrument};
 
 use crate::addr::BindAddr;
-use crate::backend::{Backend, Backends};
+use crate::backend::{Backend, ExtensionBackend};
 use crate::cache::Cache;
 use crate::route::Route;
 
@@ -38,7 +38,7 @@ pub async fn start_proxy(
     ipv4_source_prefix: u8,
     ipv6_source_prefix: u8,
     route: Route,
-    default_backend: Backends,
+    default_backend: ExtensionBackend,
     cache: Option<NonZeroUsize>,
 ) -> anyhow::Result<ProxyTask> {
     let mut server = ServerFuture::new(DnsHandler {
@@ -136,7 +136,7 @@ pub async fn start_proxy(
 #[derive(Debug)]
 struct DnsHandler {
     cache: Option<Cache>,
-    default_backend: Backends,
+    default_backend: ExtensionBackend,
     route: Route,
     ipv4_source_prefix: u8,
     ipv6_source_prefix: u8,
