@@ -10,7 +10,6 @@ cidr = "0.3.0"
 clap = { version = "4.5.23", features = ["derive"] }
 deadpool = "0.12.1"
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
-enum_dispatch = "0.3.13"
 futures-util = "0.3.30"
 #hickory-proto = { version = "0.25.0-alpha.4", features = ["dnssec", "dns-over-rustls", "native-certs"] }
 hickory-proto = { version = "0.25.0-alpha.4", features = ["dns-over-rustls", "native-certs"] } # disable dnssec to fix compile error
@@ -26,6 +25,7 @@ rustls-pemfile = "2.2.0"
 serde = { version = "1.0.215", features = ["derive"] }
 serde_yaml = "0.9"
 tokio = { version = "1.42.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tower = { version = "0.5.1", features = ["util"] }
 tracing = "0.1.41"
 tracing-log = "0.2.0"
 tracing-subscriber = "0.3.19"

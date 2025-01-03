@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io;
 use std::io::BufReader;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use clap::Parser;
 use clap::builder::styling;
@@ -15,6 +16,8 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::signal::unix;
 use tokio::signal::unix::SignalKind;
+use tower::Layer;
+use tower::layer::layer_fn;
 use tracing::level_filters::LevelFilter;
 use tracing::{error, instrument, subscriber};
 use tracing_log::LogTracer;
@@ -23,17 +26,22 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Registry, fmt};
 
 use crate::addr::BindAddr;
-use crate::backend::{Backends, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend};
+use crate::backend::{Backend, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend};
+use crate::cache::Cache;
 use crate::config::{
-    BackendDetail, Bind, BootstrapOrAddrs, Config, HttpsBasedBind, RouteType, TcpBind,
+    BackendDetail, Bind, BootstrapOrAddrs, Config, Filter, HttpsBasedBind, RouteType, TcpBind,
     TlsBasedBind, UdpBind,
 };
+use crate::filter::ecs::EcsFilterLayer;
+use crate::layer::LayerBuilder;
 use crate::route::{Route, dnsmasq::DnsmasqExt};
 
 mod addr;
 mod backend;
 mod cache;
 mod config;
+mod filter;
+mod layer;
 mod proxy;
 mod route;
 
@@ -70,7 +78,7 @@ pub async fn run() -> anyhow::Result<()> {
             return Err(anyhow::anyhow!("backend '{}' already exists", name));
         }
 
-        let backend = match backend.backend_detail {
+        let backend: Arc<dyn Backend + Send + Sync> = match backend.backend_detail {
             BackendDetail::Tls(config::TlsBackend {
                 tls_name,
                 port,
@@ -85,15 +93,13 @@ pub async fn run() -> anyhow::Result<()> {
 
                 let tls_backend = TlsBackend::new(addrs, tls_name)?;
 
-                Backends::from(tls_backend)
+                Arc::new(tls_backend)
             }
 
-            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => {
-                Backends::from(UdpBackend::new(
-                    addr.into_iter().collect(),
-                    timeout.map(|timeout| timeout.into_inner()),
-                ))
-            }
+            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Arc::new(UdpBackend::new(
+                addr.into_iter().collect(),
+                timeout.map(|timeout| timeout.into_inner()),
+            )),
 
             BackendDetail::Https(config::HttpsBasedBackend {
                 host,
@@ -110,7 +116,7 @@ pub async fn run() -> anyhow::Result<()> {
 
                 let https_backend = HttpsBackend::new(addrs, host, path)?;
 
-                Backends::from(https_backend)
+                Arc::new(https_backend)
             }
 
             BackendDetail::Quic(config::TlsBackend {
@@ -126,7 +132,7 @@ pub async fn run() -> anyhow::Result<()> {
                 };
                 let quic_backend = QuicBackend::new(addrs, tls_name)?;
 
-                Backends::from(quic_backend)
+                Arc::new(quic_backend)
             }
 
             BackendDetail::H3(config::HttpsBasedBackend {
@@ -143,7 +149,7 @@ pub async fn run() -> anyhow::Result<()> {
                 };
                 let h3_backend = H3Backend::new(addrs, host, path)?;
 
-                Backends::from(h3_backend)
+                Arc::new(h3_backend)
             }
         };
 
@@ -152,19 +158,22 @@ pub async fn run() -> anyhow::Result<()> {
 
     let mut tasks = Vec::with_capacity(config.proxy.len());
     for proxy in config.proxy {
-        let default_backend = backend_group
+        let mut default_backend = backend_group
             .get(&proxy.backend)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
 
+        default_backend = filter_backend(proxy.filter, default_backend);
         let bind_addr = create_bind_addr(proxy.bind)?;
 
         let mut route = Route::default();
         for route_config in proxy.route {
-            let backend = backend_group
+            let mut backend = backend_group
                 .get(&route_config.backend)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", route_config.backend))?;
+
+            backend = filter_backend(route_config.filter, backend);
 
             match route_config.route_type {
                 RouteType::Normal { path } => {
@@ -183,11 +192,15 @@ pub async fn run() -> anyhow::Result<()> {
 
         let task = proxy::start_proxy(
             bind_addr,
-            proxy.ipv4_prefix,
-            proxy.ipv6_prefix,
             route,
             default_backend,
-            proxy.cache.map(|cache| cache.capacity),
+            proxy.cache.map(|cache| {
+                Cache::new(
+                    cache.capacity,
+                    cache.ipv4_fuzz_prefix,
+                    cache.ipv6_fuzz_prefix,
+                )
+            }),
         )
         .await?;
         tasks.push(task);
@@ -202,6 +215,29 @@ pub async fn run() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn filter_backend(
+    filter: Vec<Filter>,
+    backend: Arc<dyn Backend + Send + Sync>,
+) -> Arc<dyn Backend + Send + Sync> {
+    let mut layer_builder = LayerBuilder::new();
+    for filter in filter {
+        match filter {
+            Filter::EdnsClientSubnet {
+                ipv4_prefix,
+                ipv6_prefix,
+            } => {
+                let ecs_filter_layer = EcsFilterLayer::new(ipv4_prefix, ipv6_prefix);
+
+                layer_builder = layer_builder.layer(layer_fn(move |backend| {
+                    Arc::new(ecs_filter_layer.layer(backend)) as Arc<dyn Backend + Send + Sync>
+                }));
+            }
+        }
+    }
+
+    layer_builder.build(backend)
 }
 
 #[instrument(ret, err)]

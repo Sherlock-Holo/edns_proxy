@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
 
+use async_trait::async_trait;
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
 use futures_util::TryStreamExt;
 use hickory_proto::op::Message;
@@ -51,6 +52,7 @@ impl QuicBackend {
     }
 }
 
+#[async_trait]
 impl Backend for QuicBackend {
     #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {

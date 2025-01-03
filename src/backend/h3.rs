@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use futures_util::lock::Mutex;
 use hickory_proto::h3::{H3ClientStream, H3ClientStreamBuilder};
@@ -59,6 +60,7 @@ impl H3Backend {
     }
 }
 
+#[async_trait]
 impl Backend for H3Backend {
     #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {

@@ -1,6 +1,8 @@
+use std::fmt::Debug;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use enum_dispatch::enum_dispatch;
+use async_trait::async_trait;
 use hickory_proto::op::Message;
 use hickory_proto::xfer::DnsResponse;
 
@@ -16,30 +18,21 @@ pub use quic::QuicBackend;
 pub use tls::TlsBackend;
 pub use udp::UdpBackend;
 
-#[enum_dispatch]
-pub trait Backend {
+#[async_trait]
+pub trait Backend: Debug {
     async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse>;
 }
 
-#[enum_dispatch(Backend)]
-#[derive(Debug, Clone)]
-pub enum Backends {
-    Tls(TlsBackend),
-    Udp(UdpBackend),
-    Https(HttpsBackend),
-    Quic(QuicBackend),
-    H3(H3Backend),
-    #[cfg(test)]
-    Test(TestBackend),
+#[async_trait]
+impl Backend for Arc<dyn Backend + Send + Sync> {
+    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
+        (**self).send_request(message, src).await
+    }
 }
 
-#[cfg(test)]
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub struct TestBackend(pub usize);
-
-#[cfg(test)]
-impl Backend for TestBackend {
-    async fn send_request(&self, _: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
-        panic!("just for test")
+#[async_trait]
+impl<B: Backend + Sync> Backend for &B {
+    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
+        (*self).send_request(message, src).await
     }
 }
