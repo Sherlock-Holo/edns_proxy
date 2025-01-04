@@ -6,12 +6,14 @@ use async_trait::async_trait;
 use hickory_proto::op::Message;
 use hickory_proto::xfer::DnsResponse;
 
+mod group;
 mod h3;
 mod https;
 mod quic;
 mod tls;
 mod udp;
 
+pub use group::Group;
 pub use h3::H3Backend;
 pub use https::HttpsBackend;
 pub use quic::QuicBackend;

@@ -26,7 +26,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Registry, fmt};
 
 use crate::addr::BindAddr;
-use crate::backend::{Backend, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend};
+use crate::backend::{
+    Backend, Group, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend,
+};
 use crate::cache::Cache;
 use crate::config::{
     BackendDetail, Bind, BootstrapOrAddrs, Config, Filter, HttpsBasedBind, RouteType, TcpBind,
@@ -71,10 +73,77 @@ pub async fn run() -> anyhow::Result<()> {
 
     let config = Config::read(&args.config)?;
 
-    let mut backend_group = HashMap::with_capacity(config.backend.len());
-    for backend in config.backend {
+    let backends = collect_backends(config.backend).await?;
+
+    let mut tasks = Vec::with_capacity(config.proxy.len());
+    for proxy in config.proxy {
+        let mut default_backend = backends
+            .get(&proxy.backend)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
+
+        default_backend = filter_backend(proxy.filter, default_backend);
+        let bind_addr = create_bind_addr(proxy.bind)?;
+
+        let mut route = Route::default();
+        for route_config in proxy.route {
+            let mut backend = backends
+                .get(&route_config.backend)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", route_config.backend))?;
+
+            backend = filter_backend(route_config.filter, backend);
+
+            match route_config.route_type {
+                RouteType::Normal { path } => {
+                    let file = File::open(path)
+                        .inspect_err(|err| error!(%err, "open normal file failed"))?;
+                    route.import(file, backend)?;
+                }
+
+                RouteType::Dnsmasq { path } => {
+                    let file = File::open(path)
+                        .inspect_err(|err| error!(%err, "open dnsmasq file failed"))?;
+                    route.import_from_dnsmasq(file, backend)?;
+                }
+            }
+        }
+
+        let task = proxy::start_proxy(
+            bind_addr,
+            route,
+            default_backend,
+            proxy.cache.map(|cache| {
+                Cache::new(
+                    cache.capacity,
+                    cache.ipv4_fuzz_prefix,
+                    cache.ipv6_fuzz_prefix,
+                )
+            }),
+        )
+        .await?;
+        tasks.push(task);
+    }
+
+    signal_stop().await?;
+
+    for mut task in tasks {
+        if let Err(err) = task.stop().await {
+            error!(%err, "stop proxy failed");
+        }
+    }
+
+    Ok(())
+}
+
+async fn collect_backends(
+    cfg_backends: Vec<config::Backend>,
+) -> anyhow::Result<HashMap<String, Arc<dyn Backend + Send + Sync>>> {
+    let mut backend_groups = HashMap::new();
+    let mut backends = HashMap::with_capacity(cfg_backends.len());
+    for backend in cfg_backends {
         let name = backend.name;
-        if backend_group.contains_key(&name) {
+        if backends.contains_key(&name) {
             return Err(anyhow::anyhow!("backend '{}' already exists", name));
         }
 
@@ -151,70 +220,36 @@ pub async fn run() -> anyhow::Result<()> {
 
                 Arc::new(h3_backend)
             }
+
+            BackendDetail::Group(backend_info_list) => {
+                backend_groups.insert(name, backend_info_list);
+
+                continue;
+            }
         };
 
-        backend_group.insert(name, backend);
+        backends.insert(name, backend);
     }
 
-    let mut tasks = Vec::with_capacity(config.proxy.len());
-    for proxy in config.proxy {
-        let mut default_backend = backend_group
-            .get(&proxy.backend)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
+    for (name, group_backend) in backend_groups {
+        let grouped_backends = group_backend
+            .backends
+            .into_iter()
+            .map(|info| {
+                backends
+                    .get(&info.name)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", info.name))
+                    .map(|backend| (info.weight, backend))
+            })
+            .try_collect::<_, Vec<_>, _>()?;
 
-        default_backend = filter_backend(proxy.filter, default_backend);
-        let bind_addr = create_bind_addr(proxy.bind)?;
+        let group = Group::new(grouped_backends);
 
-        let mut route = Route::default();
-        for route_config in proxy.route {
-            let mut backend = backend_group
-                .get(&route_config.backend)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", route_config.backend))?;
-
-            backend = filter_backend(route_config.filter, backend);
-
-            match route_config.route_type {
-                RouteType::Normal { path } => {
-                    let file = File::open(path)
-                        .inspect_err(|err| error!(%err, "open normal file failed"))?;
-                    route.import(file, backend)?;
-                }
-
-                RouteType::Dnsmasq { path } => {
-                    let file = File::open(path)
-                        .inspect_err(|err| error!(%err, "open dnsmasq file failed"))?;
-                    route.import_from_dnsmasq(file, backend)?;
-                }
-            }
-        }
-
-        let task = proxy::start_proxy(
-            bind_addr,
-            route,
-            default_backend,
-            proxy.cache.map(|cache| {
-                Cache::new(
-                    cache.capacity,
-                    cache.ipv4_fuzz_prefix,
-                    cache.ipv6_fuzz_prefix,
-                )
-            }),
-        )
-        .await?;
-        tasks.push(task);
+        backends.insert(name, Arc::new(group));
     }
 
-    signal_stop().await?;
-
-    for mut task in tasks {
-        if let Err(err) = task.stop().await {
-            error!(%err, "stop proxy failed");
-        }
-    }
-
-    Ok(())
+    Ok(backends)
 }
 
 fn filter_backend(

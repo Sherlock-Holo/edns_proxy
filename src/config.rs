@@ -96,13 +96,8 @@ pub enum BackendDetail {
     Https(HttpsBasedBackend),
     H3(HttpsBasedBackend),
     Quic(TlsBackend),
-}
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BootstrapOrAddrs {
-    Bootstrap(HashSet<SocketAddr>),
-    Addr(HashSet<SocketAddr>),
+    Group(GroupBackend),
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,10 +136,28 @@ impl HttpsBasedBackend {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapOrAddrs {
+    Bootstrap(HashSet<SocketAddr>),
+    Addr(HashSet<SocketAddr>),
+}
+
 #[derive(Debug, Deserialize, Clone, Eq, PartialEq, Hash)]
 pub struct UdpBackend {
     pub addr: Vec<SocketAddr>,
     pub timeout: Option<Serde<Duration>>,
+}
+
+#[derive(Debug, Deserialize, Clone, Eq, PartialEq, Hash)]
+pub struct GroupBackend {
+    pub backends: Vec<GroupBackendInfo>,
+}
+
+#[derive(Debug, Deserialize, Clone, Eq, PartialEq, Hash)]
+pub struct GroupBackendInfo {
+    pub name: String,
+    pub weight: usize,
 }
 
 #[derive(Debug, Deserialize)]
