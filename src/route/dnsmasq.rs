@@ -3,16 +3,23 @@ use std::io::{BufRead, BufReader, Read};
 use hickory_proto::rr::Name;
 use tracing::instrument;
 
-use crate::backend::Backends;
+use crate::backend::Backend;
 use crate::route::Route;
 
 pub trait DnsmasqExt {
-    fn import_from_dnsmasq<R: Read>(&mut self, reader: R, backend: Backends) -> anyhow::Result<()>;
+    fn import_from_dnsmasq<R, B>(&mut self, reader: R, backend: B) -> anyhow::Result<()>
+    where
+        R: Read,
+        B: Backend + Clone + Send + Sync + 'static;
 }
 
 impl DnsmasqExt for Route {
     #[instrument(err, skip(reader))]
-    fn import_from_dnsmasq<R: Read>(&mut self, reader: R, backend: Backends) -> anyhow::Result<()> {
+    fn import_from_dnsmasq<R, B>(&mut self, reader: R, backend: B) -> anyhow::Result<()>
+    where
+        R: Read,
+        B: Backend + Clone + Send + Sync + 'static,
+    {
         let lines = BufReader::new(reader).lines();
 
         for line in lines {
@@ -44,9 +51,23 @@ impl DnsmasqExt for Route {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::net::SocketAddr;
+
+    use async_trait::async_trait;
+    use hickory_proto::op::Message;
+    use hickory_proto::xfer::DnsResponse;
 
     use super::*;
-    use crate::backend::TestBackend;
+
+    #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+    struct TestBackend;
+
+    #[async_trait]
+    impl Backend for TestBackend {
+        async fn send_request(&self, _: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
+            panic!("just for test")
+        }
+    }
 
     #[test]
     fn test_import_from_dnsmasq() {
@@ -59,13 +80,8 @@ mod tests {
         let reader = Cursor::new(CONTENT.as_bytes());
         let mut route = Route::default();
 
-        route
-            .import_from_dnsmasq(reader, TestBackend(1).into())
-            .unwrap();
+        route.import_from_dnsmasq(reader, TestBackend).unwrap();
 
-        assert!(matches!(
-            route.get_backend("example.com").unwrap(),
-            Backends::Test(TestBackend(1))
-        ));
+        assert!(route.get_backend("example.com").is_some());
     }
 }

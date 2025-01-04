@@ -11,34 +11,37 @@ use lru::LruCache;
 #[derive(Debug)]
 pub struct Cache {
     inner: Mutex<CacheInner>,
+    ipv4_prefix: u8,
+    ipv6_prefix: u8,
 }
 
 impl Cache {
-    pub fn new(capacity: NonZeroUsize) -> Self {
+    pub fn new(capacity: NonZeroUsize, ipv4_prefix: u8, ipv6_prefix: u8) -> Self {
         Self {
             inner: Mutex::new(CacheInner {
                 lru_cache: LruCache::new(capacity),
             }),
+            ipv4_prefix,
+            ipv6_prefix,
         }
     }
 
-    pub async fn get_cache_response(
-        &self,
-        query: Query,
-        src_ip: IpAddr,
-        prefix: u8,
-    ) -> Option<DnsResponse> {
+    pub async fn get_cache_response(&self, query: Query, src_ip: IpAddr) -> Option<DnsResponse> {
+        let prefix = match src_ip {
+            IpAddr::V4(_) => self.ipv4_prefix,
+            IpAddr::V6(_) => self.ipv6_prefix,
+        };
+
         let ip_inet = IpInet::new(src_ip, prefix).unwrap().first();
         self.inner.lock().await.get_response(query, ip_inet)
     }
 
-    pub async fn put_cache_response(
-        &self,
-        query: Query,
-        src_ip: IpAddr,
-        prefix: u8,
-        response: DnsResponse,
-    ) {
+    pub async fn put_cache_response(&self, query: Query, src_ip: IpAddr, response: DnsResponse) {
+        let prefix = match src_ip {
+            IpAddr::V4(_) => self.ipv4_prefix,
+            IpAddr::V6(_) => self.ipv6_prefix,
+        };
+
         let ip_inet = IpInet::new(src_ip, prefix).unwrap().first();
         self.inner
             .lock()
