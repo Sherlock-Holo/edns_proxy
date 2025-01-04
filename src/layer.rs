@@ -24,7 +24,7 @@ impl LayerBuilder {
     {
         LayerBuilder {
             layer: Box::new(layer_fn(move |backend| {
-                let backend = self.layer.layer(Arc::new(backend));
+                let backend = self.layer.layer(backend);
 
                 layer.layer(backend)
             })),
