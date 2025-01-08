@@ -46,6 +46,7 @@ mod filter;
 mod layer;
 mod proxy;
 mod route;
+mod wrr;
 
 const STYLES: styling::Styles = styling::Styles::styled()
     .header(styling::AnsiColor::Green.on_default().bold())
