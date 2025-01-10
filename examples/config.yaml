@@ -65,6 +65,11 @@ proxy:
         path: examples/normal.conf
         backend: h3
 
+  - type: udp
+    bind_addr: 127.0.0.1:5959
+    timeout: 20s
+    backend: group-pub
+
   - type: https
     bind_domain: test
     private_key: examples/test.key
@@ -120,3 +125,11 @@ backend:
     tls_name: dns.alidns.com
     bootstrap:
       - 1.0.0.1:53
+
+  - name: group-pub
+    type: group
+    backends:
+      - name: dot-pub
+        weight: 10
+      - name: doh-pub
+        weight: 10
