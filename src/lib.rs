@@ -35,6 +35,7 @@ use crate::config::{
     TlsBasedBind, UdpBind,
 };
 use crate::filter::ecs::EcsFilterLayer;
+use crate::filter::static_ecs::StaticEcsFilterLayer;
 use crate::layer::LayerBuilder;
 use crate::route::{Route, dnsmasq::DnsmasqExt};
 
@@ -264,10 +265,21 @@ fn filter_backend(
                 ipv4_prefix,
                 ipv6_prefix,
             } => {
-                let ecs_filter_layer = EcsFilterLayer::new(ipv4_prefix, ipv6_prefix);
+                let layer = EcsFilterLayer::new(ipv4_prefix, ipv6_prefix);
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Arc::new(ecs_filter_layer.layer(backend)) as Arc<dyn Backend + Send + Sync>
+                    Arc::new(layer.layer(backend)) as Arc<dyn Backend + Send + Sync>
+                }));
+            }
+
+            Filter::StaticEdnsClientSubnet { ipv4, ipv6 } => {
+                let layer = StaticEcsFilterLayer::new(
+                    ipv4.map(|cfg| (cfg.ip, cfg.prefix)),
+                    ipv6.map(|cfg| (cfg.ip, cfg.prefix)),
+                );
+
+                layer_builder = layer_builder.layer(layer_fn(move |backend| {
+                    Arc::new(layer.layer(backend)) as Arc<dyn Backend + Send + Sync>
                 }));
             }
         }

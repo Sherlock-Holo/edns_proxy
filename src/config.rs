@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::File;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
@@ -207,4 +207,21 @@ pub enum Filter {
         ipv4_prefix: Option<u8>,
         ipv6_prefix: Option<u8>,
     },
+
+    StaticEdnsClientSubnet {
+        ipv4: Option<StaticEdnsClientSubnetIpv4>,
+        ipv6: Option<StaticEdnsClientSubnetIpv6>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StaticEdnsClientSubnetIpv4 {
+    pub ip: Ipv4Addr,
+    pub prefix: u8,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StaticEdnsClientSubnetIpv6 {
+    pub ip: Ipv6Addr,
+    pub prefix: u8,
 }
