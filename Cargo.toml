@@ -5,9 +5,9 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.95"
-async-trait = "0.1.84"
+async-trait = "0.1.85"
 cidr = "0.3.0"
-clap = { version = "4.5.23", features = ["derive"] }
+clap = { version = "4.5.26", features = ["derive"] }
 deadpool = "0.12.1"
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 futures-util = "0.3.31"
@@ -24,7 +24,7 @@ rustls-native-certs = "0.8.1"
 rustls-pemfile = "2.2.0"
 serde = { version = "1.0.217", features = ["derive"] }
 serde_yaml = "0.9"
-tokio = { version = "1.42.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tokio = { version = "1.43.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tower = "0.5.2"
 tracing = "0.1.41"
 tracing-log = "0.2.0"
