@@ -44,7 +44,6 @@ impl<B> Layer<B> for StaticEcsFilterLayer {
 
 #[async_trait]
 impl<B: Backend + Sync> Backend for StaticEcsFilter<B> {
-    #[inline]
     async fn send_request(
         &self,
         mut message: Message,
