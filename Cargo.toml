@@ -18,6 +18,7 @@ hickory-server = { version = "0.25.0-alpha.4", features = ["dns-over-h3", "dns-o
 humantime-serde = "1.1.1"
 itertools = "0.13.0"
 lru = "0.12.5"
+mimalloc = "0.1.43"
 rand = "0.8.5"
 rustls = { version = "0.23.20" }
 rustls-native-certs = "0.8.1"
