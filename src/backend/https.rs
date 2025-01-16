@@ -66,18 +66,20 @@ impl HttpsBackend {
 
 #[async_trait]
 impl Backend for HttpsBackend {
-    // #[instrument(level = "debug", ret, err)]
+    #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
+        // FIXME: temporary clone to avoid god damn not Send for &HttpsBackend problem
+        let inner = self.inner.clone();
+
         retry(
             async move || {
-                let mut https_client_stream = self
-                    .inner
+                let mut https_client_stream = inner
                     .create()
                     .await
                     .inspect_err(|err| {
                         error!(%err, "get https session failed");
                     })
-                    .map_err(|err| (None, anyhow::Error::from(err)))?;
+                    .map_err(|err| (None, err))?;
 
                 let mut dns_request_options = DnsRequestOptions::default();
                 dns_request_options.use_edns = true;
@@ -85,12 +87,12 @@ impl Backend for HttpsBackend {
                     .send_message(DnsRequest::new(message.clone(), dns_request_options));
 
                 if let Ok(Some(resp)) = dns_response_stream.try_next().await {
-                    return Ok(resp);
+                    Ok(resp)
                 } else {
-                    return Err((
+                    Err((
                         Some(https_client_stream),
                         anyhow::anyhow!("try get dns response failed"),
-                    ));
+                    ))
                 }
             },
             async |(mut https_client_stream, err)| {
