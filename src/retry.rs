@@ -1,4 +1,3 @@
-use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::time::Duration;
@@ -16,14 +15,14 @@ where
     F: AsyncFnMut(&mut Cx) -> Result<T, E>,
     H: AsyncFnMut(E, &mut Cx) -> ControlFlow<E, E>,
 {
-    let mut err = MaybeUninit::uninit();
+    let mut err = None;
     for _ in 0..count.get() {
         match func(&mut cx).await {
             Err(e) => {
                 match err_handle(e, &mut cx).await {
                     ControlFlow::Break(e) => return Err(e),
                     ControlFlow::Continue(e) => {
-                        err.write(e);
+                        err = Some(e);
                     }
                 }
 
@@ -36,5 +35,5 @@ where
         }
     }
 
-    unsafe { Err(err.assume_init()) }
+    Err(err.unwrap())
 }
