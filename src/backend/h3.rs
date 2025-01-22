@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +19,7 @@ use tokio::time::timeout;
 use tracing::{error, instrument};
 
 use crate::backend::Backend;
+use crate::retry::retry;
 
 #[derive(Debug, Clone)]
 pub struct H3Backend {
@@ -64,30 +67,40 @@ impl H3Backend {
 impl Backend for H3Backend {
     #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
-        for _ in 0..3 {
-            let mut h3_client_stream = match self.inner.create().await {
-                Err(err) => {
-                    error!(%err, "get h3 session failed");
+        // FIXME: temporary clone to avoid god damn not Send for &HttpsBackend problem
+        let inner = self.inner.clone();
 
-                    continue;
+        retry(
+            None,
+            async move |cx| {
+                let mut h3_client_stream = inner.create().await.inspect_err(|err| {
+                    error!(%err, "get h3 session failed");
+                })?;
+
+                let mut dns_request_options = DnsRequestOptions::default();
+                dns_request_options.use_edns = true;
+                let mut dns_response_stream = h3_client_stream
+                    .send_message(DnsRequest::new(message.clone(), dns_request_options));
+
+                if let Ok(Some(resp)) = dns_response_stream.try_next().await {
+                    Ok(resp)
+                } else {
+                    cx.replace(h3_client_stream);
+
+                    Err(anyhow::anyhow!("try get dns response failed"))
+                }
+            },
+            async |err, cx| {
+                if let Some(mut h3_client_stream) = cx.take() {
+                    h3_client_stream.shutdown();
                 }
 
-                Ok(h3_client_stream) => h3_client_stream,
-            };
-
-            let mut dns_request_options = DnsRequestOptions::default();
-            dns_request_options.use_edns = true;
-            let mut dns_response_stream = h3_client_stream
-                .send_message(DnsRequest::new(message.clone(), dns_request_options));
-
-            if let Ok(Some(resp)) = dns_response_stream.try_next().await {
-                return Ok(resp);
-            } else {
-                h3_client_stream.shutdown();
-            }
-        }
-
-        Err(anyhow::anyhow!("get dns response failed"))
+                ControlFlow::Continue(err)
+            },
+            NonZeroUsize::new(3).unwrap(),
+            None,
+        )
+        .await
     }
 }
 

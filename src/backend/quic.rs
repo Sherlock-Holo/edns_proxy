@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 
 use async_trait::async_trait;
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
@@ -14,6 +16,7 @@ use rustls::{ClientConfig, RootCertStore};
 use tracing::{error, instrument};
 
 use crate::backend::Backend;
+use crate::retry::retry;
 
 #[derive(Debug, Clone)]
 pub struct QuicBackend {
@@ -56,25 +59,37 @@ impl QuicBackend {
 impl Backend for QuicBackend {
     #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
-        for _ in 0..3 {
-            let mut obj = match self.pool.get().await {
-                Err(err) => {
+        // FIXME: temporary clone to avoid god damn not Send for &HttpsBackend problem
+        let inner = self.clone();
+
+        retry(
+            None,
+            async move |cx| {
+                let mut obj = inner.pool.get().await.map_err(|err| {
                     error!(%err, "get quic session failed");
 
-                    continue;
+                    anyhow::anyhow!("get quic session failed: {err}")
+                })?;
+
+                if let Ok(Some(resp)) = obj.send_to_quic(message.clone()).await {
+                    Ok(resp)
+                } else {
+                    cx.replace(obj);
+
+                    Err(anyhow::anyhow!("try get dns response failed"))
+                }
+            },
+            async |err, cx| {
+                if let Some(obj) = cx.take() {
+                    let _ = Object::take(obj);
                 }
 
-                Ok(obj) => obj,
-            };
-
-            if let Ok(Some(resp)) = obj.send_to_quic(message.clone()).await {
-                return Ok(resp);
-            } else {
-                let _ = Object::take(obj);
-            }
-        }
-
-        Err(anyhow::anyhow!("get dns response failed"))
+                ControlFlow::Continue(err)
+            },
+            NonZeroUsize::new(3).unwrap(),
+            None,
+        )
+        .await
     }
 }
 
