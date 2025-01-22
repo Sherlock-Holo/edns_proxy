@@ -72,14 +72,11 @@ impl Backend for HttpsBackend {
         let inner = self.inner.clone();
 
         retry(
-            async move || {
-                let mut https_client_stream = inner
-                    .create()
-                    .await
-                    .inspect_err(|err| {
-                        error!(%err, "get https session failed");
-                    })
-                    .map_err(|err| (None, err))?;
+            None,
+            async move |cx| {
+                let mut https_client_stream = inner.create().await.inspect_err(|err| {
+                    error!(%err, "get https session failed");
+                })?;
 
                 let mut dns_request_options = DnsRequestOptions::default();
                 dns_request_options.use_edns = true;
@@ -89,24 +86,22 @@ impl Backend for HttpsBackend {
                 if let Ok(Some(resp)) = dns_response_stream.try_next().await {
                     Ok(resp)
                 } else {
-                    Err((
-                        Some(https_client_stream),
-                        anyhow::anyhow!("try get dns response failed"),
-                    ))
+                    cx.replace(https_client_stream);
+
+                    Err(anyhow::anyhow!("try get dns response failed"))
                 }
             },
-            async |(mut https_client_stream, err)| {
-                if let Some(mut https_client_stream) = https_client_stream.take() {
+            async |err, cx| {
+                if let Some(mut https_client_stream) = cx.take() {
                     https_client_stream.shutdown();
                 }
 
-                ControlFlow::Continue((https_client_stream, err))
+                ControlFlow::Continue(err)
             },
             NonZeroUsize::new(3).unwrap(),
             None,
         )
         .await
-        .map_err(|(_, err)| anyhow::anyhow!("get dns response failed: {err}"))
     }
 }
 
