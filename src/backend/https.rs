@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +20,7 @@ use tokio::time::timeout;
 use tracing::{error, instrument};
 
 use crate::backend::Backend;
+use crate::retry::retry;
 
 #[derive(Debug, Clone)]
 pub struct HttpsBackend {
@@ -65,30 +68,40 @@ impl HttpsBackend {
 impl Backend for HttpsBackend {
     #[instrument(level = "debug", ret, err)]
     async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
-        for _ in 0..3 {
-            let mut https_client_stream = match self.inner.create().await {
-                Err(err) => {
-                    error!(%err, "get https session failed");
+        // FIXME: temporary clone to avoid god damn not Send for &HttpsBackend problem
+        let inner = self.inner.clone();
 
-                    continue;
+        retry(
+            None,
+            async move |cx| {
+                let mut https_client_stream = inner.create().await.inspect_err(|err| {
+                    error!(%err, "get https session failed");
+                })?;
+
+                let mut dns_request_options = DnsRequestOptions::default();
+                dns_request_options.use_edns = true;
+                let mut dns_response_stream = https_client_stream
+                    .send_message(DnsRequest::new(message.clone(), dns_request_options));
+
+                if let Ok(Some(resp)) = dns_response_stream.try_next().await {
+                    Ok(resp)
+                } else {
+                    cx.replace(https_client_stream);
+
+                    Err(anyhow::anyhow!("try get dns response failed"))
+                }
+            },
+            async |err, cx| {
+                if let Some(mut https_client_stream) = cx.take() {
+                    https_client_stream.shutdown();
                 }
 
-                Ok(https_client_stream) => https_client_stream,
-            };
-
-            let mut dns_request_options = DnsRequestOptions::default();
-            dns_request_options.use_edns = true;
-            let mut dns_response_stream = https_client_stream
-                .send_message(DnsRequest::new(message.clone(), dns_request_options));
-
-            if let Ok(Some(resp)) = dns_response_stream.try_next().await {
-                return Ok(resp);
-            } else {
-                https_client_stream.shutdown();
-            }
-        }
-
-        Err(anyhow::anyhow!("get dns response failed"))
+                ControlFlow::Continue(err)
+            },
+            NonZeroUsize::new(3).unwrap(),
+            None,
+        )
+        .await
     }
 }
 

@@ -46,6 +46,7 @@ mod config;
 mod filter;
 mod layer;
 mod proxy;
+mod retry;
 mod route;
 mod wrr;
 
