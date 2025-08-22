@@ -9,6 +9,7 @@ use hickory_server::ServerFuture;
 use hickory_server::authority::{MessageResponse, MessageResponseBuilder};
 use hickory_server::server::{Request, RequestHandler, ResponseHandler, ResponseInfo};
 use rustls::ServerConfig;
+use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use tokio::net::{TcpListener, UdpSocket};
 use tracing::{error, info, instrument};
 
@@ -65,7 +66,11 @@ pub async fn start_proxy<B: Backend + Send + Sync + 'static>(
             server.register_https_listener(
                 tcp_listener,
                 timeout.unwrap_or(DEFAULT_TIMEOUT),
-                (certificate, private_key),
+                Arc::new(SingleCertAndKey::from(CertifiedKey::from_der(
+                    certificate,
+                    private_key,
+                    &rustls::crypto::aws_lc_rs::default_provider(),
+                )?)),
                 domain,
                 path,
             )?;
@@ -100,7 +105,11 @@ pub async fn start_proxy<B: Backend + Send + Sync + 'static>(
             server.register_quic_listener(
                 udp_socket,
                 timeout.unwrap_or(DEFAULT_TIMEOUT),
-                (certificate, private_key),
+                Arc::new(SingleCertAndKey::from(CertifiedKey::from_der(
+                    certificate,
+                    private_key,
+                    &rustls::crypto::aws_lc_rs::default_provider(),
+                )?)),
                 None,
             )?;
         }
@@ -115,7 +124,11 @@ pub async fn start_proxy<B: Backend + Send + Sync + 'static>(
             server.register_h3_listener(
                 udp_socket,
                 timeout.unwrap_or(DEFAULT_TIMEOUT),
-                (certificate, private_key),
+                Arc::new(SingleCertAndKey::from(CertifiedKey::from_der(
+                    certificate,
+                    private_key,
+                    &rustls::crypto::aws_lc_rs::default_provider(),
+                )?)),
                 None,
             )?;
         }
@@ -182,20 +195,23 @@ impl DnsHandler {
         let src_addr = request.src();
         let message = self.extract_message(request);
 
+        let query = request
+            .queries()
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no query found"))?;
+
         let backend = self
             .route
-            .get_backend(&request.query().original().name().to_string())
+            .get_backend(&query.original().name().to_string())
             .unwrap_or(self.default_backend.as_ref());
 
         let response = backend.send_request(message, src_addr).await?;
 
-        if let Some(cache) = &self.cache {
+        if let Some(cache) = &self.cache
+            && let Some(query) = request.queries().first()
+        {
             cache
-                .put_cache_response(
-                    request.query().original().clone(),
-                    src_addr.ip(),
-                    response.clone(),
-                )
+                .put_cache_response(query.original().clone(), src_addr.ip(), response.clone())
                 .await;
         }
 
@@ -232,7 +248,12 @@ impl DnsHandler {
         message.set_id(request.id());
         message.set_message_type(request.message_type());
         message.set_op_code(request.op_code());
-        message.add_queries([request.query().original().clone()]);
+        message.add_queries(
+            request
+                .queries()
+                .iter()
+                .map(|query| query.original().clone()),
+        );
         message.answers_mut().extend_from_slice(request.answers());
         message
             .name_servers_mut()
@@ -253,7 +274,10 @@ impl DnsHandler {
         let cache = self.cache.as_ref()?;
 
         cache
-            .get_cache_response(request.query().original().clone(), request.src().ip())
+            .get_cache_response(
+                request.queries().first()?.original().clone(),
+                request.src().ip(),
+            )
             .await
     }
 }

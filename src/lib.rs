@@ -10,8 +10,13 @@ use clap::builder::styling;
 use futures_util::{FutureExt, select};
 use hickory_proto::xfer::Protocol;
 use hickory_resolver::Resolver;
-use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+use hickory_resolver::name_server::TokioConnectionProvider;
 use itertools::Itertools;
+use opentelemetry::KeyValue;
+use opentelemetry::trace::TracerProvider as OtelTracerProvider;
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::trace::TracerProvider;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::signal::unix;
@@ -21,6 +26,7 @@ use tower::layer::layer_fn;
 use tracing::level_filters::LevelFilter;
 use tracing::{error, instrument, subscriber};
 use tracing_log::LogTracer;
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{Registry, fmt};
@@ -299,7 +305,9 @@ async fn bootstrap_domain(
     for addr in bootstrap_addr {
         resolver_config.add_name_server(NameServerConfig::new(*addr, Protocol::Udp));
     }
-    let async_resolver = Resolver::tokio(resolver_config, ResolverOpts::default());
+
+    let async_resolver =
+        Resolver::builder_with_config(resolver_config, TokioConnectionProvider::default()).build();
 
     let mut addrs = match async_resolver.ipv4_lookup(domain).await {
         Err(err) if err.is_no_records_found() => HashSet::new(),
@@ -425,6 +433,23 @@ async fn signal_stop() -> anyhow::Result<()> {
 }
 
 fn init_log(debug: bool) {
+    // 配置OpenTelemetry资源信息
+    let resource = Resource::new(vec![
+        KeyValue::new("service.name", "edns_proxy"),
+        KeyValue::new("service.version", "0.1.0"),
+    ]);
+
+    // 创建TracerProvider，但不配置任何导出器（本地使用）
+    let tracer_provider = TracerProvider::builder().with_resource(resource).build();
+
+    let tracer = tracer_provider.tracer("edns_proxy");
+
+    // 设置全局tracer provider
+    opentelemetry::global::set_tracer_provider(tracer_provider);
+
+    // 创建OpenTelemetry layer
+    let opentelemetry_layer = OpenTelemetryLayer::new(tracer);
+
     let layer = fmt::layer()
         .pretty()
         .with_target(true)
@@ -437,7 +462,11 @@ fn init_log(debug: bool) {
     };
 
     let targets = Targets::new().with_default(LevelFilter::TRACE);
-    let layered = Registry::default().with(targets).with(layer).with(level);
+    let layered = Registry::default()
+        .with(targets)
+        .with(layer)
+        .with(opentelemetry_layer)
+        .with(level);
 
     subscriber::set_global_default(layered).unwrap();
 

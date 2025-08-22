@@ -102,10 +102,13 @@ impl CacheInner {
         };
 
         let key = RequestKey { query, src_ip };
-        self.lru_cache.push(key, CacheResponse {
-            response,
-            ttl,
-            cache_time: Instant::now(),
-        });
+        self.lru_cache.push(
+            key,
+            CacheResponse {
+                response,
+                ttl,
+                cache_time: Instant::now(),
+            },
+        );
     }
 }
