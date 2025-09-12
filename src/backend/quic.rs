@@ -10,8 +10,8 @@ use futures_util::TryStreamExt;
 use hickory_proto::op::Message;
 use hickory_proto::quic::{QuicClientStream, QuicClientStreamBuilder};
 use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse};
-use rand::prelude::IteratorRandom;
-use rand::thread_rng;
+use rand::prelude::*;
+use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
 use tracing::{error, instrument};
 
@@ -146,7 +146,7 @@ impl Manager for QuicManager {
             .addrs
             .iter()
             .copied()
-            .choose(&mut thread_rng())
+            .choose(&mut rng())
             .expect("addrs must not empty");
 
         let quic_client_stream = self.builder.clone().build(addr, self.host.clone()).await?;

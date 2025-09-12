@@ -13,8 +13,8 @@ use hickory_proto::h2::{HttpsClientStream, HttpsClientStreamBuilder};
 use hickory_proto::op::Message;
 use hickory_proto::runtime::TokioRuntimeProvider;
 use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse};
-use rand::prelude::IteratorRandom;
-use rand::thread_rng;
+use rand::prelude::*;
+use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::time::timeout;
 use tracing::{error, instrument};
@@ -170,7 +170,7 @@ impl Inner {
             .addrs
             .iter()
             .copied()
-            .choose(&mut thread_rng())
+            .choose(&mut rng())
             .expect("addrs must not empty");
 
         let mut https_client_stream = self

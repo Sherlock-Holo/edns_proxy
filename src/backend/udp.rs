@@ -9,7 +9,7 @@ use hickory_proto::runtime::TokioRuntimeProvider;
 use hickory_proto::udp::UdpClientStream;
 use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse};
 use rand::prelude::*;
-use rand::thread_rng;
+use rand::rng;
 use tracing::instrument;
 
 use crate::backend::Backend;
@@ -33,7 +33,7 @@ impl Backend for UdpBackend {
         let addr = self
             .addrs
             .iter()
-            .choose(&mut thread_rng())
+            .choose(&mut rng())
             .expect("addrs must not empty");
 
         let mut udp_client_stream = UdpClientStream::builder(*addr, TokioRuntimeProvider::new())

@@ -16,7 +16,7 @@ use hickory_proto::rustls::tls_stream::TokioTlsClientStream;
 use hickory_proto::rustls::{TlsStream, tls_connect};
 use hickory_proto::xfer::{DnsResponse, SerialMessage};
 use hickory_proto::{BufDnsStreamHandle, DnsStreamHandle};
-use rand::prelude::*;
+use rand::{prelude::*, rng};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
 use tracing::{debug, error, instrument};
@@ -151,7 +151,7 @@ impl Manager for TlsManager {
             self.addrs
                 .iter()
                 .copied()
-                .choose(&mut thread_rng())
+                .choose(&mut rng())
                 .expect("addrs must not empty"),
             self.name.clone(),
             self.tls_client_config.clone(),

@@ -12,8 +12,8 @@ use futures_util::lock::Mutex;
 use hickory_proto::h3::{H3ClientStream, H3ClientStreamBuilder};
 use hickory_proto::op::Message;
 use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse};
-use rand::prelude::IteratorRandom;
-use rand::thread_rng;
+use rand::prelude::*;
+use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
 use tokio::time::timeout;
 use tracing::{error, instrument};
@@ -169,7 +169,7 @@ impl Inner {
             .addrs
             .iter()
             .copied()
-            .choose(&mut thread_rng())
+            .choose(&mut rng())
             .expect("addrs must not empty");
 
         let mut h3_client_stream = self

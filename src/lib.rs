@@ -13,10 +13,8 @@ use hickory_resolver::Resolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::name_server::TokioConnectionProvider;
 use itertools::Itertools;
-use opentelemetry::KeyValue;
-use opentelemetry::trace::TracerProvider as OtelTracerProvider;
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::trace::TracerProvider;
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::signal::unix;
@@ -24,12 +22,12 @@ use tokio::signal::unix::SignalKind;
 use tower::Layer;
 use tower::layer::layer_fn;
 use tracing::level_filters::LevelFilter;
-use tracing::{error, instrument, subscriber};
+use tracing::{error, instrument};
 use tracing_log::LogTracer;
-use tracing_opentelemetry::OpenTelemetryLayer;
+use tracing_subscriber::Registry;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::{Registry, fmt};
+use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::addr::BindAddr;
 use crate::backend::{
@@ -433,27 +431,14 @@ async fn signal_stop() -> anyhow::Result<()> {
 }
 
 fn init_log(debug: bool) {
-    // 配置OpenTelemetry资源信息
-    let resource = Resource::new(vec![
-        KeyValue::new("service.name", "edns_proxy"),
-        KeyValue::new("service.version", "0.1.0"),
-    ]);
+    let tracer = SdkTracerProvider::builder().build().tracer("edns_proxy");
+    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
-    // 创建TracerProvider，但不配置任何导出器（本地使用）
-    let tracer_provider = TracerProvider::builder().with_resource(resource).build();
-
-    let tracer = tracer_provider.tracer("edns_proxy");
-
-    // 设置全局tracer provider
-    opentelemetry::global::set_tracer_provider(tracer_provider);
-
-    // 创建OpenTelemetry layer
-    let opentelemetry_layer = OpenTelemetryLayer::new(tracer);
-
-    let layer = fmt::layer()
-        .pretty()
-        .with_target(true)
-        .with_writer(io::stderr);
+    let json = json_subscriber::layer()
+        .with_writer(io::stderr)
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_opentelemetry_ids(true);
 
     let level = if debug {
         LevelFilter::DEBUG
@@ -462,15 +447,15 @@ fn init_log(debug: bool) {
     };
 
     let targets = Targets::new().with_default(LevelFilter::TRACE);
-    let layered = Registry::default()
+
+    Registry::default()
         .with(targets)
-        .with(layer)
-        .with(opentelemetry_layer)
-        .with(level);
+        .with(telemetry)
+        .with(level)
+        .with(json)
+        .init();
 
-    subscriber::set_global_default(layered).unwrap();
-
-    LogTracer::init().unwrap();
+    let _ = LogTracer::init();
 }
 
 fn init_tls_provider() {
