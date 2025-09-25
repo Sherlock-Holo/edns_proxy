@@ -438,6 +438,9 @@ fn init_log(debug: bool) {
         .with_writer(io::stderr)
         .with_current_span(false)
         .with_span_list(false)
+        .with_line_number(true)
+        .with_file(true)
+        .with_target(true)
         .with_opentelemetry_ids(true);
 
     let level = if debug {

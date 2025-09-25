@@ -172,7 +172,11 @@ impl RequestHandler for DnsHandler {
 
             Ok(resp) => {
                 let builder = MessageResponseBuilder::from_message_request(request);
-                let mut resp_parts = resp.into_message().into_parts();
+                let resp_message = resp.into_message();
+
+                info!(%resp_message, "get dns response done");
+
+                let mut resp_parts = resp_message.into_parts();
                 resp_parts.header.set_id(request.id());
 
                 let resp = builder.build(
