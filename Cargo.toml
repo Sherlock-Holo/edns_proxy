@@ -1,14 +1,14 @@
 [package]
 name = "edns_proxy"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]
-anyhow = "1.0.95"
-async-trait = "0.1.85"
-cidr = "0.3.1"
-clap = { version = "4.5.27", features = ["derive"] }
-deadpool = "0.12.1"
+anyhow = "1.0.101"
+async-trait = "0.1.89"
+cidr = "0.3.2"
+clap = { version = "4.5.58", features = ["derive"] }
+deadpool = "0.12.3"
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 futures-util = "0.3.31"
 hickory-proto = { version = "0.25.2", features = ["https-aws-lc-rs"] } # disable dnssec to fix compile error
@@ -16,20 +16,20 @@ hickory-resolver = { version = "0.25.2", default-features = false, features = ["
 hickory-server = { version = "0.25.2", features = ["https-aws-lc-rs", "h3-aws-lc-rs", "quic-aws-lc-rs"] }
 humantime-serde = "1.1.1"
 itertools = "0.14.0"
-json-subscriber = { version = "0.2.6", features = ["tracing-opentelemetry-0-31"] }
-lru = "0.16.0"
-mimalloc = "0.1.43"
-opentelemetry = "0.30.0"
-opentelemetry_sdk = "0.30.0"
-rand = "0.9.2"
-rustls = { version = "0.23.21" }
-rustls-native-certs = "0.8.1"
+json-subscriber = { version = "0.2.7", features = ["tracing-opentelemetry-0-32"] }
+lru = "0.16.3"
+mimalloc = "0.1.48"
+opentelemetry = "0.31.0"
+opentelemetry_sdk = "0.31.0"
+rand = "0.10.0"
+rustls = { version = "0.23.36" }
+rustls-native-certs = "0.8.3"
 rustls-pemfile = "2.2.0"
-serde = { version = "1.0.217", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9"
-tokio = { version = "1.43.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
-tower = "0.5.2"
-tracing = "0.1.41"
+tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
+tower = "0.5.3"
+tracing = "0.1.44"
 tracing-log = "0.2.0"
-tracing-opentelemetry = "0.31.0"
-tracing-subscriber = "0.3.19"
+tracing-opentelemetry = "0.32.1"
+tracing-subscriber = "0.3.22"
