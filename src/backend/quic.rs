@@ -83,3 +83,33 @@ impl Debug for QuicBuilderInner {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::*;
+    use crate::backend::tests::{check_dns_response, create_query_message};
+    use crate::backend::{AdaptorBackend, Backend};
+
+    #[tokio::test]
+    async fn test() {
+        let https_builder = QuicBuilder::new(
+            ["45.90.28.1:853".parse().unwrap()].into(),
+            "dns.nextdns.io".to_string(),
+        )
+        .unwrap();
+
+        let generic_backend = AdaptorBackend::new(https_builder, 3).await.unwrap();
+
+        let dns_response = generic_backend
+            .send_request(
+                create_query_message(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
+            )
+            .await
+            .unwrap();
+
+        check_dns_response(&dns_response);
+    }
+}

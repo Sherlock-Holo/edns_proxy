@@ -56,3 +56,37 @@ impl<B: Backend + Sync + Send + ?Sized> Backend for Box<B> {
         (**self).to_dyn_clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use hickory_proto::op::{Message, Query};
+    use hickory_proto::rr::{Name, RData, RecordType};
+    use hickory_proto::xfer::DnsResponse;
+
+    pub fn create_query_message() -> Message {
+        let mut message = Message::new();
+        message.add_query(Query::query(
+            Name::from_utf8("www.example.com").unwrap(),
+            RecordType::A,
+        ));
+        message.set_recursion_desired(true);
+
+        message
+    }
+
+    #[track_caller]
+    pub fn check_dns_response(dns_response: &DnsResponse) {
+        let answers = dns_response.answers();
+        dbg!(answers);
+
+        assert!(answers.iter().any(|record| {
+            let data = record.data();
+            match data {
+                RData::A(ip) => ip.0 == Ipv4Addr::new(104, 18, 26, 120),
+                _ => false,
+            }
+        }));
+    }
+}

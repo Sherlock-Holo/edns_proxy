@@ -102,33 +102,10 @@ impl Debug for HttpsBuilderInner {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use hickory_proto::op::{Message, Query};
-    use hickory_proto::rr::{Name, RData, RecordType};
-    use hickory_proto::xfer::DnsResponse;
-
+    use super::super::tests::*;
     use super::*;
     use crate::backend::Backend;
     use crate::backend::adaptor_backend::AdaptorBackend;
-
-    fn create_query_message() -> Message {
-        let mut message = Message::new();
-        message.add_query(Query::query(
-            Name::from_utf8("www.example.com").unwrap(),
-            RecordType::A,
-        ));
-
-        message
-    }
-
-    fn check_dns_response(dns_response: &DnsResponse) {
-        assert!(dns_response.answers().iter().any(|record| {
-            let data = record.data();
-            match data {
-                RData::A(ip) => ip.0 == Ipv4Addr::new(104, 18, 26, 120),
-                _ => false,
-            }
-        }));
-    }
 
     #[tokio::test]
     async fn test() {

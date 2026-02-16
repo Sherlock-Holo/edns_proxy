@@ -50,13 +50,16 @@ impl TlsBuilder {
 #[async_trait]
 impl DnsRequestSenderBuild for TlsBuilder {
     async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
+        let chosen_addr = self
+            .inner
+            .addrs
+            .iter()
+            .copied()
+            .choose(&mut rng())
+            .expect("addrs must not empty");
+
         let (fut, sender) = tls_connect(
-            self.inner
-                .addrs
-                .iter()
-                .copied()
-                .choose(&mut rng())
-                .expect("addrs must not empty"),
+            chosen_addr,
             self.inner.name.clone(),
             self.inner.tls_client_config.clone(),
             TokioRuntimeProvider::new(),
@@ -75,4 +78,35 @@ struct TlsBuilderInner {
     addrs: HashSet<SocketAddr>,
     name: String,
     tls_client_config: Arc<ClientConfig>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::super::tests::*;
+    use super::*;
+    use crate::backend::Backend;
+    use crate::backend::adaptor_backend::AdaptorBackend;
+
+    #[tokio::test]
+    async fn test() {
+        let https_builder = TlsBuilder::new(
+            ["1.12.12.21:853".parse().unwrap()].into(),
+            "dot.pub".to_string(),
+        )
+        .unwrap();
+
+        let generic_backend = AdaptorBackend::new(https_builder, 3).await.unwrap();
+
+        let dns_response = generic_backend
+            .send_request(
+                create_query_message(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
+            )
+            .await
+            .unwrap();
+
+        check_dns_response(&dns_response);
+    }
 }

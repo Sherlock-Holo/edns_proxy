@@ -8,7 +8,6 @@ anyhow = "1.0.101"
 async-trait = "0.1.89"
 cidr = "0.3.2"
 clap = { version = "4.5.58", features = ["derive"] }
-deadpool = "0.12.3"
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 futures-util = "0.3.31"
 hickory-proto = { version = "0.25.2", features = ["https-aws-lc-rs"] } # disable dnssec to fix compile error
