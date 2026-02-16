@@ -103,8 +103,36 @@ pub enum BackendDetail {
     Https(HttpsBasedBackend),
     H3(HttpsBasedBackend),
     Quic(TlsBackend),
+    StaticFile(StaticFileBackend),
 
     Group(GroupBackend),
+}
+
+/// Configuration for static file backend (used for deserialization)
+#[derive(Debug, Deserialize)]
+pub struct StaticFileBackend {
+    pub file: String,
+}
+
+impl StaticFileBackend {
+    pub fn load(self) -> anyhow::Result<StaticFileBackendConfig> {
+        let file = File::open(&self.file)?;
+        let records = serde_yaml::from_reader(file)?;
+
+        Ok(StaticFileBackendConfig { records })
+    }
+}
+
+/// Runtime data for static file backend (contains parsed records)
+#[derive(Debug, Eq, PartialEq, Hash)]
+pub struct StaticFileBackendConfig {
+    pub records: Vec<StaticRecord>,
+}
+
+#[derive(Debug, Deserialize, Clone, Eq, PartialEq, Hash)]
+pub struct StaticRecord {
+    pub domain: String,
+    pub ips: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]

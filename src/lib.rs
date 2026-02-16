@@ -30,8 +30,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::addr::BindAddr;
 use crate::backend::{
-    AdaptorBackend, Backend, DynBackend, Group, H3Builder, HttpsBuilder, QuicBuilder, TlsBuilder,
-    UdpBuilder,
+    AdaptorBackend, Backend, DynBackend, Group, H3Builder, HttpsBuilder, QuicBuilder,
+    StaticFileBuilder, TlsBuilder, UdpBuilder,
 };
 use crate::cache::Cache;
 use crate::config::{
@@ -235,6 +235,17 @@ async fn collect_backends(
                     AdaptorBackend::new(H3Builder::new(addrs, host, path)?, attempts).await?;
 
                 Box::new(h3_backend)
+            }
+
+            BackendDetail::StaticFile(static_config) => {
+                let static_file_backend_config = static_config.load()?;
+                let static_backend = AdaptorBackend::new(
+                    StaticFileBuilder::new(static_file_backend_config)?,
+                    attempts,
+                )
+                .await?;
+
+                Box::new(static_backend)
             }
 
             BackendDetail::Group(backend_info_list) => {

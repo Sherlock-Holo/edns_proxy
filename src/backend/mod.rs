@@ -10,6 +10,7 @@ mod group;
 mod h3;
 mod https;
 mod quic;
+mod static_file;
 mod tls;
 mod udp;
 
@@ -18,6 +19,7 @@ pub use group::Group;
 pub use h3::H3Builder;
 pub use https::HttpsBuilder;
 pub use quic::QuicBuilder;
+pub use static_file::StaticFileBuilder;
 pub use tls::TlsBuilder;
 pub use udp::UdpBuilder;
 

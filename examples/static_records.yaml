@@ -1,0 +1,51 @@
+# Static DNS records configuration file
+# This file is used by the static_file backend to provide custom DNS responses
+
+# Example: Single IPv4 address
+- domain: example.com
+  ips:
+    - 192.168.1.100
+
+# Example: Multiple IPv4 addresses (DNS round-robin)
+- domain: multi.example.com
+  ips:
+    - 192.168.1.101
+    - 192.168.1.102
+    - 192.168.1.103
+
+# Example: IPv6 address
+- domain: ipv6.example.com
+  ips:
+    - 2001:db8::1
+
+# Example: Mixed IPv4 and IPv6 addresses
+- domain: dualstack.example.com
+  ips:
+    - 192.168.1.200
+    - 2001:db8::2
+
+# Example: Wildcard domain (*.test.com matches test.com, a.test.com, b.test.com, etc.)
+- domain: "*.test.com"
+  ips:
+    - 10.0.0.1
+    - 10.0.0.2
+
+# Example: Local development
+- domain: localhost.example.com
+  ips:
+    - 127.0.0.1
+    - ::1
+
+# Example: Internal services
+- domain: api.internal.local
+  ips:
+    - 172.16.0.10
+
+- domain: db.internal.local
+  ips:
+    - 172.16.0.20
+    - 172.16.0.21
+
+# Example: Block domain by returning NXDomain (empty ips)
+# Note: The static_file backend returns NXDomain for unmatched domains by default
+# To explicitly block a domain, you can use an empty ips list or configure it in your main config

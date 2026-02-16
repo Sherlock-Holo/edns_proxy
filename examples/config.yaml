@@ -98,6 +98,11 @@ proxy:
           ip: 2001:da8::1
           prefix: 64
 
+  - type: udp
+    bind_addr: 127.0.0.1:6060
+    timeout: 5s
+    backend: static-dns
+
 backend:
   - name: dot-pub
     type: tls
@@ -137,3 +142,7 @@ backend:
         weight: 10
       - name: doh-pub
         weight: 10
+
+  - name: static-dns
+    type: static_file
+    file: examples/static_records.yaml
