@@ -149,6 +149,7 @@ mod tests {
     use hickory_proto::xfer::DnsResponse;
 
     use super::*;
+    use crate::backend::DynBackend;
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     pub struct TestBackend(pub usize);
@@ -157,6 +158,10 @@ mod tests {
     impl Backend for TestBackend {
         async fn send_request(&self, _: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
             panic!("just for test")
+        }
+
+        fn to_dyn_clone(&self) -> DynBackend {
+            Box::new(*self)
         }
     }
 

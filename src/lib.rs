@@ -3,7 +3,6 @@ use std::fs::File;
 use std::io;
 use std::io::BufReader;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use clap::Parser;
 use clap::builder::styling;
@@ -31,7 +30,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::addr::BindAddr;
 use crate::backend::{
-    Backend, Group, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend,
+    AdaptorBackend, Backend, DynBackend, Group, H3Builder, HttpsBuilder, QuicBuilder, TlsBuilder,
+    UdpBuilder,
 };
 use crate::cache::Cache;
 use crate::config::{
@@ -50,8 +50,8 @@ mod config;
 mod filter;
 mod layer;
 mod proxy;
-mod retry;
 mod route;
+mod utils;
 mod wrr;
 
 const STYLES: styling::Styles = styling::Styles::styled()
@@ -84,22 +84,20 @@ pub async fn run() -> anyhow::Result<()> {
 
     let mut tasks = Vec::with_capacity(config.proxy.len());
     for proxy in config.proxy {
-        let mut default_backend = backends
+        let default_backend = backends
             .get(&proxy.backend)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
-
-        default_backend = filter_backend(proxy.filter, default_backend);
+        let default_backend = filter_backend(proxy.filter, default_backend);
         let bind_addr = create_bind_addr(proxy.bind)?;
 
         let mut route = Route::default();
         for route_config in proxy.route {
-            let mut backend = backends
+            let backend = backends
                 .get(&route_config.backend)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", route_config.backend))?;
-
-            backend = filter_backend(route_config.filter, backend);
+            let backend = filter_backend(route_config.filter, backend);
 
             match route_config.route_type {
                 RouteType::Normal { path } => {
@@ -145,16 +143,17 @@ pub async fn run() -> anyhow::Result<()> {
 
 async fn collect_backends(
     cfg_backends: Vec<config::Backend>,
-) -> anyhow::Result<HashMap<String, Arc<dyn Backend + Send + Sync>>> {
+) -> anyhow::Result<HashMap<String, DynBackend>> {
     let mut backend_groups = HashMap::new();
     let mut backends = HashMap::with_capacity(cfg_backends.len());
     for backend in cfg_backends {
+        let attempts = backend.attempts();
         let name = backend.name;
         if backends.contains_key(&name) {
             return Err(anyhow::anyhow!("backend '{}' already exists", name));
         }
 
-        let backend: Arc<dyn Backend + Send + Sync> = match backend.backend_detail {
+        let backend: DynBackend = match backend.backend_detail {
             BackendDetail::Tls(config::TlsBackend {
                 tls_name,
                 port,
@@ -167,15 +166,22 @@ async fn collect_backends(
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
 
-                let tls_backend = TlsBackend::new(addrs, tls_name)?;
+                let tls_backend =
+                    AdaptorBackend::new(TlsBuilder::new(addrs, tls_name)?, attempts).await?;
 
-                Arc::new(tls_backend)
+                Box::new(tls_backend)
             }
 
-            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Arc::new(UdpBackend::new(
-                addr.into_iter().collect(),
-                timeout.map(|timeout| timeout.into_inner()),
-            )),
+            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Box::new(
+                AdaptorBackend::new(
+                    UdpBuilder::new(
+                        addr.into_iter().collect(),
+                        timeout.map(|timeout| timeout.into_inner()),
+                    ),
+                    attempts,
+                )
+                .await?,
+            ),
 
             BackendDetail::Https(config::HttpsBasedBackend {
                 host,
@@ -190,9 +196,10 @@ async fn collect_backends(
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
 
-                let https_backend = HttpsBackend::new(addrs, host, path)?;
+                let https_backend =
+                    AdaptorBackend::new(HttpsBuilder::new(addrs, host, path)?, attempts).await?;
 
-                Arc::new(https_backend)
+                Box::new(https_backend)
             }
 
             BackendDetail::Quic(config::TlsBackend {
@@ -206,9 +213,10 @@ async fn collect_backends(
                     }
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
-                let quic_backend = QuicBackend::new(addrs, tls_name)?;
+                let quic_backend =
+                    AdaptorBackend::new(QuicBuilder::new(addrs, tls_name)?, attempts).await?;
 
-                Arc::new(quic_backend)
+                Box::new(quic_backend)
             }
 
             BackendDetail::H3(config::HttpsBasedBackend {
@@ -223,9 +231,10 @@ async fn collect_backends(
                     }
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
-                let h3_backend = H3Backend::new(addrs, host, path)?;
+                let h3_backend =
+                    AdaptorBackend::new(H3Builder::new(addrs, host, path)?, attempts).await?;
 
-                Arc::new(h3_backend)
+                Box::new(h3_backend)
             }
 
             BackendDetail::Group(backend_info_list) => {
@@ -253,16 +262,16 @@ async fn collect_backends(
 
         let group = Group::new(grouped_backends);
 
-        backends.insert(name, Arc::new(group));
+        backends.insert(name, Box::new(group));
     }
 
     Ok(backends)
 }
 
-fn filter_backend(
+fn filter_backend<B: Backend + Send + Sync + 'static>(
     filter: Vec<Filter>,
-    backend: Arc<dyn Backend + Send + Sync>,
-) -> Arc<dyn Backend + Send + Sync> {
+    backend: B,
+) -> DynBackend {
     let mut layer_builder = LayerBuilder::new();
     for filter in filter {
         match filter {
@@ -273,7 +282,7 @@ fn filter_backend(
                 let layer = EcsFilterLayer::new(ipv4_prefix, ipv6_prefix);
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Arc::new(layer.layer(backend)) as Arc<dyn Backend + Send + Sync>
+                    Box::new(layer.layer(backend)) as DynBackend
                 }));
             }
 
@@ -284,7 +293,7 @@ fn filter_backend(
                 );
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Arc::new(layer.layer(backend)) as Arc<dyn Backend + Send + Sync>
+                    Box::new(layer.layer(backend)) as DynBackend
                 }));
             }
         }

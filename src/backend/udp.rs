@@ -1,55 +1,45 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::TryStreamExt;
-use hickory_proto::op::Message;
 use hickory_proto::runtime::TokioRuntimeProvider;
 use hickory_proto::udp::UdpClientStream;
-use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse};
 use rand::prelude::*;
 use rand::rng;
-use tracing::instrument;
 
-use crate::backend::Backend;
+use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
 
 #[derive(Debug, Clone)]
-pub struct UdpBackend {
-    addrs: HashSet<SocketAddr>,
+pub struct UdpBuilder {
+    addrs: Arc<HashSet<SocketAddr>>,
     timeout: Option<Duration>,
 }
 
-impl UdpBackend {
+impl UdpBuilder {
     pub fn new(addrs: HashSet<SocketAddr>, timeout: Option<Duration>) -> Self {
-        Self { addrs, timeout }
+        Self {
+            addrs: Arc::new(addrs),
+            timeout,
+        }
     }
 }
 
 #[async_trait]
-impl Backend for UdpBackend {
-    #[instrument(level = "debug", ret, err)]
-    async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
+impl DnsRequestSenderBuild for UdpBuilder {
+    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
         let addr = self
             .addrs
             .iter()
             .choose(&mut rng())
             .expect("addrs must not empty");
 
-        let mut udp_client_stream = UdpClientStream::builder(*addr, TokioRuntimeProvider::new())
+        let udp_client_stream = UdpClientStream::builder(*addr, TokioRuntimeProvider::new())
             .with_timeout(self.timeout)
             .build()
             .await?;
 
-        let mut dns_request_options = DnsRequestOptions::default();
-        dns_request_options.use_edns = true;
-        let mut resp_stream =
-            udp_client_stream.send_message(DnsRequest::new(message, dns_request_options));
-
-        match resp_stream.try_next().await? {
-            None => Err(anyhow::anyhow!("get udp dns response failed")),
-
-            Some(resp) => Ok(resp),
-        }
+        Ok(BoxDnsRequestSender::new(udp_client_stream))
     }
 }

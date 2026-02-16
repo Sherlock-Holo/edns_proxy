@@ -1,13 +1,11 @@
-use std::sync::Arc;
-
 use tower::Layer;
 use tower::layer::layer_fn;
 use tower::layer::util::Identity;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, DynBackend};
 
 pub struct LayerBuilder {
-    layer: Box<dyn Layer<Arc<dyn Backend + Send + Sync>, Service = Arc<dyn Backend + Send + Sync>>>,
+    layer: Box<dyn Layer<DynBackend, Service = DynBackend>>,
 }
 
 impl LayerBuilder {
@@ -19,8 +17,7 @@ impl LayerBuilder {
 
     pub fn layer<L>(self, layer: L) -> LayerBuilder
     where
-        L: Layer<Arc<dyn Backend + Send + Sync>, Service = Arc<dyn Backend + Send + Sync>>
-            + 'static,
+        L: Layer<DynBackend, Service = DynBackend> + 'static,
     {
         LayerBuilder {
             layer: Box::new(layer_fn(move |backend| {
@@ -31,12 +28,9 @@ impl LayerBuilder {
         }
     }
 
-    pub fn build<B: Backend + Send + Sync + 'static>(
-        self,
-        backend: B,
-    ) -> Arc<dyn Backend + Send + Sync> {
-        let service = self.layer.layer(Arc::new(backend));
+    pub fn build<B: Backend + Send + Sync + 'static>(self, backend: B) -> DynBackend {
+        let service = self.layer.layer(Box::new(backend));
 
-        Arc::new(service)
+        Box::new(service)
     }
 }
