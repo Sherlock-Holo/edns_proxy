@@ -34,7 +34,8 @@ pub struct StaticFileBuilder {
 
 impl StaticFileBuilder {
     pub fn new(config: StaticFileBackendConfig) -> anyhow::Result<Self> {
-        let mut inner = StaticFileInner::default();
+        let mut exact_matches = HashMap::new();
+        let mut wildcard_matches = HashMap::new();
 
         for record in config.records {
             let ips = record
@@ -55,19 +56,22 @@ impl StaticFileBuilder {
                 None => {
                     // Exact domain
                     let name = Name::from_utf8(&record.domain)?.to_lowercase();
-                    inner.exact_matches.insert(name, ips);
+                    exact_matches.insert(name, ips);
                 }
 
                 Some(suffix) => {
                     // Wildcard domain: *.test.com -> stored as test.com.
                     let name = Name::from_utf8(suffix)?.to_lowercase();
-                    inner.wildcard_matches.insert(name.to_string(), ips);
+                    wildcard_matches.insert(name.to_string(), ips);
                 }
             }
         }
 
         Ok(Self {
-            inner: Arc::new(inner),
+            inner: Arc::new(StaticFileInner {
+                exact_matches,
+                wildcard_matches,
+            }),
         })
     }
 }
