@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::ready;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -10,18 +11,37 @@ use hickory_proto::ProtoError;
 use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::xfer::{DnsRequest, DnsRequestSender, DnsResponse, DnsResponseStream};
-use tracing::debug;
+use tracing::{debug, info, instrument};
 
 use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
 use crate::config::StaticFileBackendConfig;
 
 const DEFAULT_TTL: u32 = 3600; // 1 hour
 
+#[derive(Debug, Clone, Ord, PartialOrd)]
+struct DomainKey(Name);
+
+impl DomainKey {
+    fn from_name(mut name: Name) -> Self {
+        name.set_fqdn(true);
+
+        Self(name)
+    }
+}
+
+impl PartialEq for DomainKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq_ignore_root(&other.0)
+    }
+}
+
+impl Eq for DomainKey {}
+
 /// Inner data shared between builder and request sender
 #[derive(Debug, Default)]
 struct StaticFileInner {
     /// Exact domain match: domain -> IPs
-    exact_matches: HashMap<Name, Vec<RData>>,
+    exact_matches: BTreeMap<DomainKey, Vec<RData>>,
     /// Wildcard domain match: suffix -> IPs
     /// For example, "*.test.com" is stored as "test.com." -> IPs
     wildcard_matches: HashMap<String, Vec<RData>>,
@@ -34,7 +54,9 @@ pub struct StaticFileBuilder {
 
 impl StaticFileBuilder {
     pub fn new(config: StaticFileBackendConfig) -> anyhow::Result<Self> {
-        let mut exact_matches = HashMap::new();
+        info!(?config, "create static file backend builder");
+
+        let mut exact_matches = BTreeMap::new();
         let mut wildcard_matches = HashMap::new();
 
         for record in config.records {
@@ -42,9 +64,9 @@ impl StaticFileBuilder {
                 .ips
                 .iter()
                 .map(|ip| {
-                    if let Ok(ipv4) = ip.parse::<std::net::Ipv4Addr>() {
+                    if let Ok(ipv4) = ip.parse::<Ipv4Addr>() {
                         Ok(RData::A(ipv4.into()))
-                    } else if let Ok(ipv6) = ip.parse::<std::net::Ipv6Addr>() {
+                    } else if let Ok(ipv6) = ip.parse::<Ipv6Addr>() {
                         Ok(RData::AAAA(ipv6.into()))
                     } else {
                         Err(anyhow::anyhow!("Invalid IP address: {}", ip))
@@ -55,23 +77,28 @@ impl StaticFileBuilder {
             match record.domain.strip_prefix("*.") {
                 None => {
                     // Exact domain
-                    let name = Name::from_utf8(&record.domain)?.to_lowercase();
-                    exact_matches.insert(name, ips);
+                    let name = Name::from_utf8(&record.domain)?;
+                    exact_matches.insert(DomainKey::from_name(name), ips);
                 }
 
                 Some(suffix) => {
                     // Wildcard domain: *.test.com -> stored as test.com.
-                    let name = Name::from_utf8(suffix)?.to_lowercase();
-                    wildcard_matches.insert(name.to_string(), ips);
+                    let name = Name::from_utf8(suffix)?;
+                    wildcard_matches
+                        .insert(normalize_domain_str(&mut name.to_string()).to_string(), ips);
                 }
             }
         }
 
+        let inner = StaticFileInner {
+            exact_matches,
+            wildcard_matches,
+        };
+
+        info!(?inner, "created static file backend builder inner done");
+
         Ok(Self {
-            inner: Arc::new(StaticFileInner {
-                exact_matches,
-                wildcard_matches,
-            }),
+            inner: Arc::new(inner),
         })
     }
 }
@@ -127,7 +154,7 @@ impl DnsRequestSender for StaticFileDnsRequestSender {
         response.add_query(query.clone());
 
         // Look up matching records
-        let ips = self.lookup_ips(query_name, query_type);
+        let ips = self.lookup_ips(query_name.clone(), query_type);
 
         if let Some(ips) = ips {
             // Found matching records
@@ -158,9 +185,12 @@ impl DnsRequestSender for StaticFileDnsRequestSender {
 
 impl StaticFileDnsRequestSender {
     /// Look up matching IPs for a query
-    fn lookup_ips(&self, query_name: &Name, query_type: RecordType) -> Option<Vec<RData>> {
+    #[instrument(skip(self), ret)]
+    fn lookup_ips(&self, query_name: Name, query_type: RecordType) -> Option<Vec<RData>> {
+        let query_key = DomainKey::from_name(query_name);
+
         // First try exact match
-        if let Some(found) = self.inner.exact_matches.get(query_name) {
+        if let Some(found) = self.inner.exact_matches.get(&query_key) {
             let filtered = Self::filter_by_type(found, query_type);
             if !filtered.is_empty() {
                 return Some(filtered);
@@ -168,10 +198,13 @@ impl StaticFileDnsRequestSender {
         }
 
         // Try wildcard match
-        let query_name_str = query_name.to_lowercase().to_string();
-        for (suffix, found) in self.inner.wildcard_matches.iter() {
-            if query_name_str == *suffix || query_name_str.ends_with(&format!(".{}", suffix)) {
-                let filtered = Self::filter_by_type(found, query_type);
+        let mut query_key = query_key.0.to_string();
+        let query_trimmed = normalize_domain_str(&mut query_key);
+        for (suffix, rdata_list) in self.inner.wildcard_matches.iter() {
+            let wildcard_hit =
+                query_trimmed == *suffix || query_trimmed.ends_with(&format!(".{suffix}"));
+            if wildcard_hit {
+                let filtered = Self::filter_by_type(rdata_list, query_type);
                 if !filtered.is_empty() {
                     return Some(filtered);
                 }
@@ -182,6 +215,7 @@ impl StaticFileDnsRequestSender {
     }
 
     /// Filter IPs by query type
+    #[instrument(ret)]
     fn filter_by_type(ips: &[RData], query_type: RecordType) -> Vec<RData> {
         match query_type {
             RecordType::A => ips
@@ -189,19 +223,28 @@ impl StaticFileDnsRequestSender {
                 .filter(|ip| matches!(ip, RData::A(_)))
                 .cloned()
                 .collect(),
+
             RecordType::AAAA => ips
                 .iter()
                 .filter(|ip| matches!(ip, RData::AAAA(_)))
                 .cloned()
                 .collect(),
+
             _ => ips.to_vec(),
         }
     }
 }
 
+fn normalize_domain_str(input: &mut str) -> &str {
+    input.make_ascii_lowercase();
+
+    input.trim_end_matches('.')
+}
+
 #[cfg(test)]
 mod tests {
-    use hickory_proto::xfer::FirstAnswer;
+    use hickory_proto::op::Query;
+    use hickory_proto::xfer::{DnsRequestOptions, FirstAnswer};
 
     use super::*;
     use crate::config::StaticRecord;
@@ -219,19 +262,19 @@ mod tests {
         let mut sender = builder.build().await.unwrap();
 
         let mut message = Message::new();
-        message.add_query(hickory_proto::op::Query::query(
+        message.add_query(Query::query(
             Name::from_utf8("example.com").unwrap(),
             RecordType::A,
         ));
 
-        let request = DnsRequest::new(message, hickory_proto::xfer::DnsRequestOptions::default());
+        let request = DnsRequest::new(message, DnsRequestOptions::default());
         let response = sender.send_message(request).first_answer().await.unwrap();
 
         assert_eq!(response.answers().len(), 1);
         let record = &response.answers()[0];
         assert_eq!(record.record_type(), RecordType::A);
         if let RData::A(ip) = record.data() {
-            assert_eq!(ip.0, std::net::Ipv4Addr::new(1, 2, 3, 4));
+            assert_eq!(ip.0, Ipv4Addr::new(1, 2, 3, 4));
         } else {
             panic!("Expected A record");
         }
@@ -251,31 +294,31 @@ mod tests {
 
         // Test test.com
         let mut message = Message::new();
-        message.add_query(hickory_proto::op::Query::query(
+        message.add_query(Query::query(
             Name::from_utf8("test.com").unwrap(),
             RecordType::A,
         ));
-        let request = DnsRequest::new(message, hickory_proto::xfer::DnsRequestOptions::default());
+        let request = DnsRequest::new(message, DnsRequestOptions::default());
         let response = sender.send_message(request).first_answer().await.unwrap();
         assert_eq!(response.answers().len(), 1);
 
         // Test a.test.com
         let mut message = Message::new();
-        message.add_query(hickory_proto::op::Query::query(
+        message.add_query(Query::query(
             Name::from_utf8("a.test.com").unwrap(),
             RecordType::A,
         ));
-        let request = DnsRequest::new(message, hickory_proto::xfer::DnsRequestOptions::default());
+        let request = DnsRequest::new(message, DnsRequestOptions::default());
         let response = sender.send_message(request).first_answer().await.unwrap();
         assert_eq!(response.answers().len(), 1);
 
         // Test a.b.test.com
         let mut message = Message::new();
-        message.add_query(hickory_proto::op::Query::query(
+        message.add_query(Query::query(
             Name::from_utf8("a.b.test.com").unwrap(),
             RecordType::A,
         ));
-        let request = DnsRequest::new(message, hickory_proto::xfer::DnsRequestOptions::default());
+        let request = DnsRequest::new(message, DnsRequestOptions::default());
         let response = sender.send_message(request).first_answer().await.unwrap();
         assert_eq!(response.answers().len(), 1);
     }
@@ -293,12 +336,12 @@ mod tests {
         let mut sender = builder.build().await.unwrap();
 
         let mut message = Message::new();
-        message.add_query(hickory_proto::op::Query::query(
+        message.add_query(Query::query(
             Name::from_utf8("other.com").unwrap(),
             RecordType::A,
         ));
 
-        let request = DnsRequest::new(message, hickory_proto::xfer::DnsRequestOptions::default());
+        let request = DnsRequest::new(message, DnsRequestOptions::default());
         let response = sender.send_message(request).first_answer().await.unwrap();
 
         assert_eq!(response.response_code(), ResponseCode::NXDomain);
@@ -318,12 +361,12 @@ mod tests {
         let mut sender = builder.build().await.unwrap();
 
         let mut message = Message::new();
-        message.add_query(hickory_proto::op::Query::query(
+        message.add_query(Query::query(
             Name::from_utf8("example.com").unwrap(),
             RecordType::A,
         ));
 
-        let request = DnsRequest::new(message, hickory_proto::xfer::DnsRequestOptions::default());
+        let request = DnsRequest::new(message, DnsRequestOptions::default());
         let response = sender.send_message(request).first_answer().await.unwrap();
 
         assert_eq!(response.answers().len(), 2);
@@ -342,12 +385,12 @@ mod tests {
         let mut sender = builder.build().await.unwrap();
 
         let mut message = Message::new();
-        message.add_query(hickory_proto::op::Query::query(
+        message.add_query(Query::query(
             Name::from_utf8("example.com").unwrap(),
             RecordType::AAAA,
         ));
 
-        let request = DnsRequest::new(message, hickory_proto::xfer::DnsRequestOptions::default());
+        let request = DnsRequest::new(message, DnsRequestOptions::default());
         let response = sender.send_message(request).first_answer().await.unwrap();
 
         assert_eq!(response.answers().len(), 1);
