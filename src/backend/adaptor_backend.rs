@@ -1,10 +1,12 @@
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use async_notify::Notify;
 use async_trait::async_trait;
 use futures_util::{Stream, StreamExt};
 use hickory_proto::DnsHandle;
@@ -15,7 +17,6 @@ use hickory_proto::xfer::{
     FirstAnswer,
 };
 use hickory_proto::{ProtoError, RetryDnsHandle};
-use tokio::sync::{Mutex, Notify, RwLock};
 use tracing::{error, instrument};
 
 use crate::backend::{Backend, DynBackend};
@@ -146,7 +147,7 @@ impl Inner {
         let (exchange, background_task) = DnsExchange::from_stream::<_, TokioTime>(sender);
         tokio::spawn(background_task);
 
-        *self.exchange.write().await = RetryDnsHandle::new(exchange, attempts);
+        *self.exchange.write().unwrap() = RetryDnsHandle::new(exchange, attempts);
 
         Ok(())
     }
@@ -156,7 +157,7 @@ impl Inner {
     async fn ensure_rebuilt(&self, attempts: usize) -> anyhow::Result<()> {
         loop {
             let build_by_me = {
-                let mut guard = self.rebuild.lock().await;
+                let mut guard = self.rebuild.lock().unwrap();
                 if !guard.in_progress {
                     guard.in_progress = true;
                     true
@@ -172,17 +173,19 @@ impl Inner {
                     .map(|_| ())
                     .map_err(|e| anyhow::anyhow!("{}", e));
                 {
-                    let mut guard = self.rebuild.lock().await;
+                    let mut guard = self.rebuild.lock().unwrap();
                     guard.in_progress = false;
                     guard.result = result_for_waiters;
                 }
-                self.rebuild_done.notify_waiters();
+                self.rebuild_done
+                    .notify_waiters(NonZeroUsize::new(usize::MAX).unwrap());
+
                 return result;
             }
 
             self.rebuild_done.notified().await;
 
-            match &self.rebuild.lock().await.result {
+            match &self.rebuild.lock().unwrap().result {
                 Ok(()) => return Ok(()),
 
                 Err(err) => {
@@ -197,8 +200,8 @@ impl Inner {
         let mut options = DnsRequestOptions::default();
         options.use_edns = true;
         let request = DnsRequest::new(message, options);
-        let exchange = self.exchange.read().await;
-        let response = exchange.clone().send(request).first_answer().await?;
+        let exchange = self.exchange.read().unwrap().clone();
+        let response = exchange.send(request).first_answer().await?;
 
         Ok(response)
     }

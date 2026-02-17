@@ -1,17 +1,23 @@
+use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures_util::lock::Mutex;
 use hickory_proto::op::Message;
 use hickory_proto::xfer::DnsResponse;
 
 use crate::backend::{Backend, DynBackend};
 use crate::wrr::SmoothWeight;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Group {
     backends: Arc<Mutex<SmoothWeight<DynBackend>>>,
+}
+
+impl Debug for Group {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Group").finish_non_exhaustive()
+    }
 }
 
 impl Group {
@@ -37,7 +43,7 @@ impl Backend for Group {
         let backend = self
             .backends
             .lock()
-            .await
+            .unwrap()
             .next()
             .expect("backends must not empty");
 
