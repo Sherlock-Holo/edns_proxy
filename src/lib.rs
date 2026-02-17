@@ -1,12 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
-use std::io::BufReader;
+use std::io::{BufReader, IsTerminal};
 use std::net::SocketAddr;
-use std::sync::Arc;
 
-use clap::Parser;
 use clap::builder::styling;
+use clap::{Parser, ValueEnum};
 use futures_util::{FutureExt, select};
 use hickory_proto::xfer::Protocol;
 use hickory_resolver::Resolver;
@@ -23,6 +22,7 @@ use tower::Layer;
 use tower::layer::layer_fn;
 use tracing::level_filters::LevelFilter;
 use tracing::{error, instrument};
+use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
 use tracing_log::LogTracer;
 use tracing_subscriber::Registry;
 use tracing_subscriber::filter::Targets;
@@ -31,7 +31,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::addr::BindAddr;
 use crate::backend::{
-    Backend, Group, H3Backend, HttpsBackend, QuicBackend, TlsBackend, UdpBackend,
+    AdaptorBackend, Backend, DynBackend, Group, H3Builder, HttpsBuilder, QuicBuilder,
+    StaticFileBuilder, TlsBuilder, UdpBuilder,
 };
 use crate::cache::Cache;
 use crate::config::{
@@ -50,8 +51,8 @@ mod config;
 mod filter;
 mod layer;
 mod proxy;
-mod retry;
 mod route;
+mod utils;
 mod wrr;
 
 const STYLES: styling::Styles = styling::Styles::styled()
@@ -63,19 +64,41 @@ const STYLES: styling::Styles = styling::Styles::styled()
 #[derive(Debug, Parser)]
 #[command(styles = STYLES)]
 pub struct Args {
-    #[clap(short, long)]
+    #[clap(short, long, env)]
     /// config path
     config: String,
 
-    #[clap(short, long)]
-    /// enable debug log
-    debug: bool,
+    #[clap(short, long, env, default_value = "info")]
+    /// log level
+    log_level: LogLevel,
+}
+
+#[derive(Debug, ValueEnum, Eq, PartialEq, Copy, Clone, Default)]
+enum LogLevel {
+    Off,
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+impl From<LogLevel> for LevelFilter {
+    fn from(value: LogLevel) -> Self {
+        match value {
+            LogLevel::Off => LevelFilter::OFF,
+            LogLevel::Debug => LevelFilter::DEBUG,
+            LogLevel::Info => LevelFilter::INFO,
+            LogLevel::Warn => LevelFilter::WARN,
+            LogLevel::Error => LevelFilter::ERROR,
+        }
+    }
 }
 
 pub async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    init_log(args.debug);
+    let _guard = init_log(args.log_level);
     init_tls_provider();
 
     let config = Config::read(&args.config)?;
@@ -84,22 +107,20 @@ pub async fn run() -> anyhow::Result<()> {
 
     let mut tasks = Vec::with_capacity(config.proxy.len());
     for proxy in config.proxy {
-        let mut default_backend = backends
+        let default_backend = backends
             .get(&proxy.backend)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
-
-        default_backend = filter_backend(proxy.filter, default_backend);
+        let default_backend = filter_backend(proxy.filter, default_backend);
         let bind_addr = create_bind_addr(proxy.bind)?;
 
         let mut route = Route::default();
         for route_config in proxy.route {
-            let mut backend = backends
+            let backend = backends
                 .get(&route_config.backend)
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", route_config.backend))?;
-
-            backend = filter_backend(route_config.filter, backend);
+            let backend = filter_backend(route_config.filter, backend);
 
             match route_config.route_type {
                 RouteType::Normal { path } => {
@@ -145,16 +166,17 @@ pub async fn run() -> anyhow::Result<()> {
 
 async fn collect_backends(
     cfg_backends: Vec<config::Backend>,
-) -> anyhow::Result<HashMap<String, Arc<dyn Backend + Send + Sync>>> {
+) -> anyhow::Result<HashMap<String, DynBackend>> {
     let mut backend_groups = HashMap::new();
     let mut backends = HashMap::with_capacity(cfg_backends.len());
     for backend in cfg_backends {
+        let attempts = backend.attempts();
         let name = backend.name;
         if backends.contains_key(&name) {
             return Err(anyhow::anyhow!("backend '{}' already exists", name));
         }
 
-        let backend: Arc<dyn Backend + Send + Sync> = match backend.backend_detail {
+        let backend: DynBackend = match backend.backend_detail {
             BackendDetail::Tls(config::TlsBackend {
                 tls_name,
                 port,
@@ -167,15 +189,22 @@ async fn collect_backends(
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
 
-                let tls_backend = TlsBackend::new(addrs, tls_name)?;
+                let tls_backend =
+                    AdaptorBackend::new(TlsBuilder::new(addrs, tls_name)?, attempts).await?;
 
-                Arc::new(tls_backend)
+                Box::new(tls_backend)
             }
 
-            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Arc::new(UdpBackend::new(
-                addr.into_iter().collect(),
-                timeout.map(|timeout| timeout.into_inner()),
-            )),
+            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Box::new(
+                AdaptorBackend::new(
+                    UdpBuilder::new(
+                        addr.into_iter().collect(),
+                        timeout.map(|timeout| timeout.into_inner()),
+                    ),
+                    attempts,
+                )
+                .await?,
+            ),
 
             BackendDetail::Https(config::HttpsBasedBackend {
                 host,
@@ -190,9 +219,10 @@ async fn collect_backends(
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
 
-                let https_backend = HttpsBackend::new(addrs, host, path)?;
+                let https_backend =
+                    AdaptorBackend::new(HttpsBuilder::new(addrs, host, path)?, attempts).await?;
 
-                Arc::new(https_backend)
+                Box::new(https_backend)
             }
 
             BackendDetail::Quic(config::TlsBackend {
@@ -206,9 +236,10 @@ async fn collect_backends(
                     }
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
-                let quic_backend = QuicBackend::new(addrs, tls_name)?;
+                let quic_backend =
+                    AdaptorBackend::new(QuicBuilder::new(addrs, tls_name)?, attempts).await?;
 
-                Arc::new(quic_backend)
+                Box::new(quic_backend)
             }
 
             BackendDetail::H3(config::HttpsBasedBackend {
@@ -223,9 +254,21 @@ async fn collect_backends(
                     }
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
-                let h3_backend = H3Backend::new(addrs, host, path)?;
+                let h3_backend =
+                    AdaptorBackend::new(H3Builder::new(addrs, host, path)?, attempts).await?;
 
-                Arc::new(h3_backend)
+                Box::new(h3_backend)
+            }
+
+            BackendDetail::StaticFile(static_config) => {
+                let static_file_backend_config = static_config.load()?;
+                let static_backend = AdaptorBackend::new(
+                    StaticFileBuilder::new(static_file_backend_config)?,
+                    attempts,
+                )
+                .await?;
+
+                Box::new(static_backend)
             }
 
             BackendDetail::Group(backend_info_list) => {
@@ -253,16 +296,16 @@ async fn collect_backends(
 
         let group = Group::new(grouped_backends);
 
-        backends.insert(name, Arc::new(group));
+        backends.insert(name, Box::new(group));
     }
 
     Ok(backends)
 }
 
-fn filter_backend(
+fn filter_backend<B: Backend + Send + Sync + 'static>(
     filter: Vec<Filter>,
-    backend: Arc<dyn Backend + Send + Sync>,
-) -> Arc<dyn Backend + Send + Sync> {
+    backend: B,
+) -> DynBackend {
     let mut layer_builder = LayerBuilder::new();
     for filter in filter {
         match filter {
@@ -273,7 +316,7 @@ fn filter_backend(
                 let layer = EcsFilterLayer::new(ipv4_prefix, ipv6_prefix);
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Arc::new(layer.layer(backend)) as Arc<dyn Backend + Send + Sync>
+                    Box::new(layer.layer(backend)) as DynBackend
                 }));
             }
 
@@ -284,7 +327,7 @@ fn filter_backend(
                 );
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Arc::new(layer.layer(backend)) as Arc<dyn Backend + Send + Sync>
+                    Box::new(layer.layer(backend)) as DynBackend
                 }));
             }
         }
@@ -430,12 +473,45 @@ async fn signal_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_log(debug: bool) {
+fn init_log(level: LogLevel) -> WorkerGuard {
+    let (writer, guard) = NonBlockingBuilder::default()
+        .lossy(false)
+        .buffered_lines_limit(512_000)
+        .finish(io::stderr());
+
+    if io::stderr().is_terminal() {
+        init_console_log(level, writer);
+    } else {
+        init_json_log(level, writer);
+    }
+
+    let _ = LogTracer::init();
+
+    guard
+}
+
+fn init_console_log(level: LogLevel, writer: NonBlocking) {
+    let layer = tracing_subscriber::fmt::layer()
+        .pretty()
+        .with_line_number(true)
+        .with_writer(writer)
+        .with_target(true);
+
+    let targets = Targets::new().with_default(LevelFilter::TRACE);
+
+    Registry::default()
+        .with(targets)
+        .with(layer)
+        .with(LevelFilter::from(level))
+        .init();
+}
+
+fn init_json_log(level: LogLevel, writer: NonBlocking) {
     let tracer = SdkTracerProvider::builder().build().tracer("edns_proxy");
     let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
     let json = json_subscriber::layer()
-        .with_writer(io::stderr)
+        .with_writer(writer)
         .with_current_span(false)
         .with_span_list(false)
         .with_line_number(true)
@@ -443,22 +519,14 @@ fn init_log(debug: bool) {
         .with_target(true)
         .with_opentelemetry_ids(true);
 
-    let level = if debug {
-        LevelFilter::DEBUG
-    } else {
-        LevelFilter::INFO
-    };
-
     let targets = Targets::new().with_default(LevelFilter::TRACE);
 
     Registry::default()
         .with(targets)
         .with(telemetry)
-        .with(level)
+        .with(LevelFilter::from(level))
         .with(json)
         .init();
-
-    let _ = LogTracer::init();
 }
 
 fn init_tls_provider() {

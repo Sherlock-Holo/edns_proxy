@@ -1,35 +1,25 @@
 use std::collections::HashSet;
-use std::fmt::{Debug, Formatter};
-use std::io;
+use std::fmt::Debug;
+use std::future::ready;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
-use futures_util::TryStreamExt;
-use hickory_proto::op::Message;
+use hickory_proto::DnsMultiplexer;
 use hickory_proto::runtime::TokioRuntimeProvider;
-use hickory_proto::runtime::iocompat::AsyncIoTokioAsStd;
-use hickory_proto::rustls::tls_stream::TokioTlsClientStream;
-use hickory_proto::rustls::{TlsStream, tls_connect};
-use hickory_proto::xfer::{DnsResponse, SerialMessage};
-use hickory_proto::{BufDnsStreamHandle, DnsStreamHandle};
+use hickory_proto::rustls::tls_connect;
+use hickory_proto::tcp::TcpClientStream;
 use rand::{prelude::*, rng};
 use rustls::{ClientConfig, RootCertStore};
-use tokio::net::TcpStream;
-use tracing::{debug, error, instrument};
 
-use crate::backend::Backend;
-use crate::retry::retry;
+use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
 
 #[derive(Debug, Clone)]
-pub struct TlsBackend {
-    pool: Pool<TlsManager>,
+pub struct TlsBuilder {
+    inner: Arc<TlsBuilderInner>,
 }
 
-impl TlsBackend {
+impl TlsBuilder {
     pub fn new(addrs: HashSet<SocketAddr>, name: String) -> anyhow::Result<Self> {
         let mut root_cert_store = RootCertStore::empty();
         let certs = rustls_native_certs::load_native_certs();
@@ -47,126 +37,76 @@ impl TlsBackend {
             .with_root_certificates(root_cert_store)
             .with_no_client_auth();
 
-        let pool = Pool::builder(TlsManager {
-            addrs,
-            name,
-            tls_client_config: Arc::new(client_config),
+        Ok(Self {
+            inner: Arc::new(TlsBuilderInner {
+                addrs,
+                name,
+                tls_client_config: client_config.into(),
+            }),
         })
-        .build()?;
-
-        Ok(Self { pool })
     }
 }
 
 #[async_trait]
-impl Backend for TlsBackend {
-    #[instrument(level = "debug", ret, err)]
-    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
-        // FIXME: temporary clone to avoid god damn not Send for &HttpsBackend problem
-        let inner = self.clone();
+impl DnsRequestSenderBuild for TlsBuilder {
+    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
+        let chosen_addr = self
+            .inner
+            .addrs
+            .iter()
+            .copied()
+            .choose(&mut rng())
+            .expect("addrs must not empty");
 
-        retry(
-            None,
-            async move |cx| {
-                let mut obj = inner.pool.get().await.map_err(|err| {
-                    error!(%err, "get tls session failed");
+        let (fut, sender) = tls_connect(
+            chosen_addr,
+            self.inner.name.clone(),
+            self.inner.tls_client_config.clone(),
+            TokioRuntimeProvider::new(),
+        );
 
-                    anyhow::anyhow!("get tls session failed: {err}")
-                })?;
+        let tls_stream = fut.await?;
+        let tls_stream = TcpClientStream::from_stream(tls_stream);
+        let dns_multiplexer = DnsMultiplexer::new(ready(Ok(tls_stream)), sender, None).await?;
 
-                if let Ok(Some(resp)) = obj.send_to_tls(&message, src).await {
-                    Ok(resp)
-                } else {
-                    cx.replace(obj);
-
-                    Err(anyhow::anyhow!("try get dns response failed"))
-                }
-            },
-            async |err, cx| {
-                if let Some(obj) = cx.take() {
-                    let _ = Object::take(obj);
-                }
-
-                ControlFlow::Continue(err)
-            },
-            NonZeroUsize::new(3).unwrap(),
-            None,
-        )
-        .await
-    }
-}
-
-struct Tls {
-    tls_stream: TlsStream<AsyncIoTokioAsStd<TokioTlsClientStream<AsyncIoTokioAsStd<TcpStream>>>>,
-    sender: BufDnsStreamHandle,
-}
-
-impl Debug for Tls {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Tls").finish_non_exhaustive()
-    }
-}
-
-impl Tls {
-    #[instrument(level = "debug", ret, err)]
-    async fn send_to_tls(
-        &mut self,
-        message: &Message,
-        src: SocketAddr,
-    ) -> anyhow::Result<Option<DnsResponse>> {
-        let message_data = message.to_vec()?;
-
-        self.sender.send(SerialMessage::new(message_data, src))?;
-
-        let resp = match self.tls_stream.try_next().await? {
-            None => {
-                debug!("no more tls dns response for this session");
-
-                return Ok(None);
-            }
-
-            Some(resp) => resp,
-        };
-
-        let resp_message = resp.to_message()?;
-
-        Ok(Some(DnsResponse::from_message(resp_message)?))
+        Ok(BoxDnsRequestSender::new(dns_multiplexer))
     }
 }
 
 #[derive(Debug)]
-struct TlsManager {
+struct TlsBuilderInner {
     addrs: HashSet<SocketAddr>,
     name: String,
     tls_client_config: Arc<ClientConfig>,
 }
 
-impl Manager for TlsManager {
-    type Type = Tls;
-    type Error = io::Error;
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
 
-    #[instrument(level = "debug", err)]
-    async fn create(&self) -> Result<Self::Type, Self::Error> {
-        let (fut, sender) = tls_connect(
-            self.addrs
-                .iter()
-                .copied()
-                .choose(&mut rng())
-                .expect("addrs must not empty"),
-            self.name.clone(),
-            self.tls_client_config.clone(),
-            TokioRuntimeProvider::new(),
-        );
-        let tls_stream = fut.await?;
+    use super::super::tests::*;
+    use super::*;
+    use crate::backend::Backend;
+    use crate::backend::adaptor_backend::AdaptorBackend;
 
-        Ok(Tls { tls_stream, sender })
-    }
+    #[tokio::test]
+    async fn test() {
+        let https_builder = TlsBuilder::new(
+            ["1.12.12.21:853".parse().unwrap()].into(),
+            "dot.pub".to_string(),
+        )
+        .unwrap();
 
-    async fn recycle(
-        &self,
-        _obj: &mut Self::Type,
-        _metrics: &Metrics,
-    ) -> RecycleResult<Self::Error> {
-        Ok(())
+        let generic_backend = AdaptorBackend::new(https_builder, 3).await.unwrap();
+
+        let dns_response = generic_backend
+            .send_request(
+                create_query_message(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
+            )
+            .await
+            .unwrap();
+
+        check_dns_response(&dns_response);
     }
 }

@@ -1,29 +1,22 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
-use std::ops::ControlFlow;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
-use futures_util::TryStreamExt;
-use hickory_proto::op::Message;
-use hickory_proto::quic::{QuicClientStream, QuicClientStreamBuilder};
-use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse};
+use hickory_proto::quic::QuicClientStreamBuilder;
 use rand::prelude::*;
 use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
-use tracing::{error, instrument};
 
-use crate::backend::Backend;
-use crate::retry::retry;
+use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
 
 #[derive(Debug, Clone)]
-pub struct QuicBackend {
-    pool: Pool<QuicManager>,
+pub struct QuicBuilder {
+    inner: Arc<QuicBuilderInner>,
 }
 
-impl QuicBackend {
+impl QuicBuilder {
     pub fn new(addrs: HashSet<SocketAddr>, host: String) -> anyhow::Result<Self> {
         let mut root_cert_store = RootCertStore::empty();
         let certs = rustls_native_certs::load_native_certs();
@@ -44,121 +37,79 @@ impl QuicBackend {
         let mut builder = QuicClientStreamBuilder::default();
         builder.crypto_config(client_config);
 
-        let pool = Pool::builder(QuicManager {
-            addrs,
-            host,
-            builder,
+        Ok(Self {
+            inner: Arc::new(QuicBuilderInner {
+                addrs,
+                host,
+                builder,
+            }),
         })
-        .build()?;
-
-        Ok(Self { pool })
     }
 }
 
 #[async_trait]
-impl Backend for QuicBackend {
-    #[instrument(level = "debug", ret, err)]
-    async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
-        // FIXME: temporary clone to avoid god damn not Send for &HttpsBackend problem
-        let inner = self.clone();
-
-        retry(
-            None,
-            async move |cx| {
-                let mut obj = inner.pool.get().await.map_err(|err| {
-                    error!(%err, "get quic session failed");
-
-                    anyhow::anyhow!("get quic session failed: {err}")
-                })?;
-
-                if let Ok(Some(resp)) = obj.send_to_quic(message.clone()).await {
-                    Ok(resp)
-                } else {
-                    cx.replace(obj);
-
-                    Err(anyhow::anyhow!("try get dns response failed"))
-                }
-            },
-            async |err, cx| {
-                if let Some(obj) = cx.take() {
-                    let _ = Object::take(obj);
-                }
-
-                ControlFlow::Continue(err)
-            },
-            NonZeroUsize::new(3).unwrap(),
-            None,
-        )
-        .await
-    }
-}
-
-struct Quic {
-    quic_client_stream: QuicClientStream,
-}
-
-impl Debug for Quic {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Quic")
-            .field("quic_client_stream", &self.quic_client_stream.to_string())
-            .finish()
-    }
-}
-
-impl Quic {
-    #[instrument(level = "debug", ret, err)]
-    async fn send_to_quic(&mut self, message: Message) -> anyhow::Result<Option<DnsResponse>> {
-        let mut dns_request_options = DnsRequestOptions::default();
-        dns_request_options.use_edns = true;
-        let mut dns_response_stream = self
-            .quic_client_stream
-            .send_message(DnsRequest::new(message, dns_request_options));
-
-        Ok(dns_response_stream.try_next().await.inspect_err(|_| {
-            // drop the incorrect state quic session
-            self.quic_client_stream.shutdown();
-        })?)
-    }
-}
-
-struct QuicManager {
-    addrs: HashSet<SocketAddr>,
-    host: String,
-    builder: QuicClientStreamBuilder,
-}
-
-impl Debug for QuicManager {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("QuicManager")
-            .field("addrs", &self.addrs)
-            .field("host", &self.host)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Manager for QuicManager {
-    type Type = Quic;
-    type Error = anyhow::Error;
-
-    #[instrument(level = "debug", err)]
-    async fn create(&self) -> Result<Self::Type, Self::Error> {
+impl DnsRequestSenderBuild for QuicBuilder {
+    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
         let addr = self
+            .inner
             .addrs
             .iter()
             .copied()
             .choose(&mut rng())
             .expect("addrs must not empty");
 
-        let quic_client_stream = self.builder.clone().build(addr, self.host.clone()).await?;
+        let quic_client_stream = self
+            .inner
+            .builder
+            .clone()
+            .build(addr, self.inner.host.clone())
+            .await?;
 
-        Ok(Quic { quic_client_stream })
+        Ok(BoxDnsRequestSender::new(quic_client_stream))
     }
+}
 
-    async fn recycle(
-        &self,
-        _obj: &mut Self::Type,
-        _metrics: &Metrics,
-    ) -> RecycleResult<Self::Error> {
-        Ok(())
+struct QuicBuilderInner {
+    addrs: HashSet<SocketAddr>,
+    host: String,
+    builder: QuicClientStreamBuilder,
+}
+
+impl Debug for QuicBuilderInner {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuicManagerBuilderInner")
+            .field("addrs", &self.addrs)
+            .field("host", &self.host)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::*;
+    use crate::backend::tests::{check_dns_response, create_query_message};
+    use crate::backend::{AdaptorBackend, Backend};
+
+    #[tokio::test]
+    async fn test() {
+        let https_builder = QuicBuilder::new(
+            ["45.90.28.1:853".parse().unwrap()].into(),
+            "dns.nextdns.io".to_string(),
+        )
+        .unwrap();
+
+        let generic_backend = AdaptorBackend::new(https_builder, 3).await.unwrap();
+
+        let dns_response = generic_backend
+            .send_request(
+                create_query_message(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
+            )
+            .await
+            .unwrap();
+
+        check_dns_response(&dns_response);
     }
 }

@@ -6,16 +6,16 @@ use futures_util::lock::Mutex;
 use hickory_proto::op::Message;
 use hickory_proto::xfer::DnsResponse;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, DynBackend};
 use crate::wrr::SmoothWeight;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Group {
-    backends: Mutex<SmoothWeight<Arc<dyn Backend + Send + Sync>>>,
+    backends: Arc<Mutex<SmoothWeight<DynBackend>>>,
 }
 
 impl Group {
-    pub fn new(backends: Vec<(usize, Arc<dyn Backend + Send + Sync>)>) -> Self {
+    pub fn new(backends: Vec<(usize, DynBackend)>) -> Self {
         let backends =
             backends
                 .into_iter()
@@ -26,7 +26,7 @@ impl Group {
                 });
 
         Self {
-            backends: Mutex::new(backends),
+            backends: Arc::new(Mutex::new(backends)),
         }
     }
 }
@@ -42,5 +42,9 @@ impl Backend for Group {
             .expect("backends must not empty");
 
         backend.send_request(message, src).await
+    }
+
+    fn to_dyn_clone(&self) -> DynBackend {
+        Box::new(self.clone())
     }
 }

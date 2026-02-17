@@ -1,33 +1,24 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
-use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use futures_util::lock::Mutex;
-use hickory_proto::h2::{HttpsClientStream, HttpsClientStreamBuilder};
-use hickory_proto::op::Message;
+use hickory_proto::h2::HttpsClientStreamBuilder;
 use hickory_proto::runtime::TokioRuntimeProvider;
-use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse};
 use rand::prelude::*;
 use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
-use tokio::time::timeout;
-use tracing::{error, instrument};
 
-use crate::backend::Backend;
-use crate::retry::retry;
+use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
 
 #[derive(Debug, Clone)]
-pub struct HttpsBackend {
-    inner: Arc<Inner>,
+pub struct HttpsBuilder {
+    inner: Arc<HttpsBuilderInner>,
 }
 
-impl HttpsBackend {
+impl HttpsBuilder {
     pub fn new(
         addrs: HashSet<SocketAddr>,
         host: String,
@@ -50,7 +41,7 @@ impl HttpsBackend {
             .with_no_client_auth();
 
         Ok(Self {
-            inner: Arc::new(Inner {
+            inner: Arc::new(HttpsBuilderInner {
                 addrs,
                 host,
                 query_path,
@@ -58,115 +49,16 @@ impl HttpsBackend {
                     Arc::new(client_config),
                     TokioRuntimeProvider::new(),
                 ),
-                using_https_client_stream: Default::default(),
             }),
         })
     }
 }
 
 #[async_trait]
-impl Backend for HttpsBackend {
-    #[instrument(level = "debug", ret, err)]
-    async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
-        // FIXME: temporary clone to avoid god damn not Send for &HttpsBackend problem
-        let inner = self.inner.clone();
-
-        retry(
-            None,
-            async move |cx| {
-                let mut https_client_stream = inner.create().await.inspect_err(|err| {
-                    error!(%err, "get https session failed");
-                })?;
-
-                let mut dns_request_options = DnsRequestOptions::default();
-                dns_request_options.use_edns = true;
-                let mut dns_response_stream = https_client_stream
-                    .send_message(DnsRequest::new(message.clone(), dns_request_options));
-
-                if let Ok(Some(resp)) = dns_response_stream.try_next().await {
-                    Ok(resp)
-                } else {
-                    cx.replace(https_client_stream);
-
-                    Err(anyhow::anyhow!("try get dns response failed"))
-                }
-            },
-            async |err, cx| {
-                if let Some(mut https_client_stream) = cx.take() {
-                    https_client_stream.shutdown();
-                }
-
-                ControlFlow::Continue(err)
-            },
-            NonZeroUsize::new(3).unwrap(),
-            None,
-        )
-        .await
-    }
-}
-
-struct Inner {
-    addrs: HashSet<SocketAddr>,
-    host: String,
-    query_path: String,
-    builder: HttpsClientStreamBuilder<TokioRuntimeProvider>,
-    using_https_client_stream: Mutex<Option<HttpsClientStream>>,
-}
-
-impl Debug for Inner {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Inner")
-            .field("addrs", &self.addrs)
-            .field("host", &self.host)
-            .field("using_https_client_stream", &self.using_https_client_stream)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Inner {
-    #[instrument(level = "debug", err)]
-    async fn create(&self) -> anyhow::Result<HttpsClientStream> {
-        const LOCK_TIMEOUT: Duration = Duration::from_millis(300);
-
-        let https_client_stream = match timeout(LOCK_TIMEOUT, async {
-            let mut using_https_client_stream = self.using_https_client_stream.lock().await;
-            let using_https_client_stream_mut = match &mut *using_https_client_stream {
-                None => {
-                    let https_client_stream = self.create_new_https_client_stream().await?;
-                    *using_https_client_stream = Some(https_client_stream.clone());
-
-                    return Ok(https_client_stream);
-                }
-
-                Some(using_https_client_stream) => using_https_client_stream,
-            };
-
-            match using_https_client_stream_mut.try_next().await {
-                Err(_) => {
-                    *using_https_client_stream = None;
-                    let https_client_stream = self.create_new_https_client_stream().await?;
-                    *using_https_client_stream = Some(https_client_stream.clone());
-
-                    Ok(https_client_stream)
-                }
-
-                Ok(None) => return self.create_new_https_client_stream().await,
-                Ok(Some(_)) => Ok(using_https_client_stream_mut.clone()),
-            }
-        })
-        .await
-        {
-            Err(_) => self.create_new_https_client_stream().await?,
-            Ok(Err(err)) => return Err(err),
-            Ok(Ok(https_client_stream)) => https_client_stream,
-        };
-
-        Ok(https_client_stream)
-    }
-
-    #[instrument(level = "debug", err)]
-    async fn create_new_https_client_stream(&self) -> anyhow::Result<HttpsClientStream> {
+impl DnsRequestSenderBuild for HttpsBuilder {
+    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
         let addr = self
+            .inner
             .addrs
             .iter()
             .copied()
@@ -174,9 +66,10 @@ impl Inner {
             .expect("addrs must not empty");
 
         let mut https_client_stream = self
+            .inner
             .builder
             .clone()
-            .build(addr, self.host.clone(), self.query_path.clone())
+            .build(addr, self.inner.host.clone(), self.inner.query_path.clone())
             .await?;
 
         https_client_stream
@@ -184,6 +77,55 @@ impl Inner {
             .await?
             .ok_or_else(|| anyhow::anyhow!("https stream connected but closed immediately"))?;
 
-        Ok(https_client_stream)
+        Ok(BoxDnsRequestSender::new(https_client_stream))
+    }
+}
+
+struct HttpsBuilderInner {
+    addrs: HashSet<SocketAddr>,
+    host: String,
+    query_path: String,
+    builder: HttpsClientStreamBuilder<TokioRuntimeProvider>,
+}
+
+impl Debug for HttpsBuilderInner {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpsBuilderInner")
+            .field("addrs", &self.addrs)
+            .field("host", &self.host)
+            .field("query_path", &self.query_path)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use super::super::tests::*;
+    use super::*;
+    use crate::backend::Backend;
+    use crate::backend::adaptor_backend::AdaptorBackend;
+
+    #[tokio::test]
+    async fn test() {
+        let https_builder = HttpsBuilder::new(
+            ["1.12.12.21:443".parse().unwrap()].into(),
+            "doh.pub".to_string(),
+            "/dns-query".to_string(),
+        )
+        .unwrap();
+
+        let generic_backend = AdaptorBackend::new(https_builder, 3).await.unwrap();
+
+        let dns_response = generic_backend
+            .send_request(
+                create_query_message(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
+            )
+            .await
+            .unwrap();
+
+        check_dns_response(&dns_response);
     }
 }

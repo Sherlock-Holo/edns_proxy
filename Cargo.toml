@@ -7,8 +7,7 @@ edition = "2024"
 anyhow = "1.0.101"
 async-trait = "0.1.89"
 cidr = "0.3.2"
-clap = { version = "4.5.58", features = ["derive"] }
-deadpool = "0.12.3"
+clap = { version = "4.5.58", features = ["derive", "env"] }
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 futures-util = "0.3.31"
 hickory-proto = { version = "0.25.2", features = ["https-aws-lc-rs"] } # disable dnssec to fix compile error
@@ -30,6 +29,7 @@ serde_yaml = "0.9"
 tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tower = "0.5.3"
 tracing = "0.1.44"
+tracing-appender = "0.2.4"
 tracing-log = "0.2.0"
 tracing-opentelemetry = "0.32.1"
 tracing-subscriber = "0.3.22"
