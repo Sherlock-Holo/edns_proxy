@@ -18,9 +18,9 @@ humantime-serde = "1.1.1"
 itertools = "0.14.0"
 json-subscriber = { version = "0.2.7", features = ["tracing-opentelemetry-0-32"] }
 mimalloc = "0.1.48"
-moka = { version = "0.12.13", features = ["future"] }
 opentelemetry = "0.31.0"
 opentelemetry_sdk = "0.31.0"
+quick_cache = { version = "0.6.18", default-features = false, features = ["ahash"] }
 rand = "0.10.0"
 rustls = { version = "0.23.36" }
 rustls-native-certs = "0.8.3"
