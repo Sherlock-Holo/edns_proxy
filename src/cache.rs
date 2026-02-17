@@ -1,26 +1,22 @@
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use cidr::IpInet;
 use hickory_proto::op::Query;
 use hickory_proto::xfer::DnsResponse;
-use moka::Expiry;
-use moka::future::Cache as MokaCache;
+use quick_cache::sync::Cache as S3FifoCache;
 
 #[derive(Debug)]
 pub struct Cache {
-    inner: MokaCache<RequestKey, CacheResponse>,
+    inner: S3FifoCache<RequestKey, CacheResponse>,
     ipv4_prefix: u8,
     ipv6_prefix: u8,
 }
 
 impl Cache {
     pub fn new(capacity: NonZeroUsize, ipv4_prefix: u8, ipv6_prefix: u8) -> Self {
-        let cache = MokaCache::builder()
-            .max_capacity(capacity.get() as _)
-            .expire_after(TtlExpiry)
-            .build();
+        let cache = S3FifoCache::new(capacity.get());
 
         Self {
             inner: cache,
@@ -36,7 +32,7 @@ impl Cache {
         };
 
         let ip_inet = IpInet::new(src_ip, prefix).unwrap().first();
-        self.get_response(query, ip_inet).await
+        self.get_response(query, ip_inet)
     }
 
     pub async fn put_cache_response(&self, query: Query, src_ip: IpAddr, response: DnsResponse) {
@@ -46,23 +42,7 @@ impl Cache {
         };
 
         let ip_inet = IpInet::new(src_ip, prefix).unwrap().first();
-        self.add_response(query, ip_inet, response).await;
-    }
-}
-
-#[derive(Debug)]
-struct TtlExpiry;
-
-impl Expiry<RequestKey, CacheResponse> for TtlExpiry {
-    fn expire_after_create(
-        &self,
-        _key: &RequestKey,
-        value: &CacheResponse,
-        _created_at: Instant,
-    ) -> Option<Duration> {
-        let ttl = Duration::from_secs(value.ttl as _);
-
-        Some(ttl)
+        self.add_response(query, ip_inet, response);
     }
 }
 
@@ -80,14 +60,14 @@ struct CacheResponse {
 }
 
 impl Cache {
-    async fn get_response(&self, query: Query, src_ip: IpInet) -> Option<DnsResponse> {
+    fn get_response(&self, query: Query, src_ip: IpInet) -> Option<DnsResponse> {
         let key = RequestKey { query, src_ip };
-        let resp = self.inner.get(&key).await?;
+        let resp = self.inner.get(&key)?;
         let elapsed = resp.cache_time.elapsed().as_secs() as u32;
         let ttl = resp.ttl;
 
         if elapsed >= ttl {
-            self.inner.invalidate(&key).await;
+            self.inner.remove(&key);
 
             None
         } else {
@@ -100,7 +80,7 @@ impl Cache {
         }
     }
 
-    async fn add_response(&self, query: Query, src_ip: IpInet, response: DnsResponse) {
+    fn add_response(&self, query: Query, src_ip: IpInet, response: DnsResponse) {
         let ttl = match response.answers().iter().map(|record| record.ttl()).min() {
             None => return,
             Some(ttl) => {
@@ -113,15 +93,13 @@ impl Cache {
         };
 
         let key = RequestKey { query, src_ip };
-        self.inner
-            .insert(
-                key,
-                CacheResponse {
-                    response,
-                    ttl,
-                    cache_time: Instant::now(),
-                },
-            )
-            .await;
+        self.inner.insert(
+            key,
+            CacheResponse {
+                response,
+                ttl,
+                cache_time: Instant::now(),
+            },
+        );
     }
 }
