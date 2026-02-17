@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io;
-use std::io::BufReader;
+use std::io::{BufReader, IsTerminal};
 use std::net::SocketAddr;
 
-use clap::Parser;
 use clap::builder::styling;
+use clap::{Parser, ValueEnum};
 use futures_util::{FutureExt, select};
 use hickory_proto::xfer::Protocol;
 use hickory_resolver::Resolver;
@@ -67,15 +67,37 @@ pub struct Args {
     /// config path
     config: String,
 
-    #[clap(short, long)]
-    /// enable debug log
-    debug: bool,
+    #[clap(short, long, default_value = "info")]
+    /// log level
+    log_level: LogLevel,
+}
+
+#[derive(Debug, ValueEnum, Eq, PartialEq, Copy, Clone, Default)]
+enum LogLevel {
+    Off,
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+impl From<LogLevel> for LevelFilter {
+    fn from(value: LogLevel) -> Self {
+        match value {
+            LogLevel::Off => LevelFilter::OFF,
+            LogLevel::Debug => LevelFilter::DEBUG,
+            LogLevel::Info => LevelFilter::INFO,
+            LogLevel::Warn => LevelFilter::WARN,
+            LogLevel::Error => LevelFilter::ERROR,
+        }
+    }
 }
 
 pub async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    init_log(args.debug);
+    init_log(args.log_level);
     init_tls_provider();
 
     let config = Config::read(&args.config)?;
@@ -450,7 +472,33 @@ async fn signal_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_log(debug: bool) {
+fn init_log(level: LogLevel) {
+    if io::stderr().is_terminal() {
+        init_console_log(level);
+    } else {
+        init_json_log(level);
+    }
+
+    let _ = LogTracer::init();
+}
+
+fn init_console_log(level: LogLevel) {
+    let layer = tracing_subscriber::fmt::layer()
+        .pretty()
+        .with_line_number(true)
+        .with_writer(io::stderr)
+        .with_target(true);
+
+    let targets = Targets::new().with_default(LevelFilter::TRACE);
+
+    Registry::default()
+        .with(targets)
+        .with(layer)
+        .with(LevelFilter::from(level))
+        .init();
+}
+
+fn init_json_log(level: LogLevel) {
     let tracer = SdkTracerProvider::builder().build().tracer("edns_proxy");
     let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
@@ -463,22 +511,14 @@ fn init_log(debug: bool) {
         .with_target(true)
         .with_opentelemetry_ids(true);
 
-    let level = if debug {
-        LevelFilter::DEBUG
-    } else {
-        LevelFilter::INFO
-    };
-
     let targets = Targets::new().with_default(LevelFilter::TRACE);
 
     Registry::default()
         .with(targets)
         .with(telemetry)
-        .with(level)
+        .with(LevelFilter::from(level))
         .with(json)
         .init();
-
-    let _ = LogTracer::init();
 }
 
 fn init_tls_provider() {

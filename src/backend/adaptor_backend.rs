@@ -191,6 +191,7 @@ impl Inner {
         }
     }
 
+    #[instrument(skip(self), ret, err)]
     async fn do_query(&self, message: Message) -> anyhow::Result<DnsResponse> {
         let mut options = DnsRequestOptions::default();
         options.use_edns = true;
