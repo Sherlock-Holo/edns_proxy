@@ -8,17 +8,17 @@ anyhow = "1.0.101"
 async-notify = "0.3.3"
 async-trait = "0.1.89"
 cidr = "0.3.2"
-clap = { version = "4.5.58", features = ["derive", "env"] }
+clap = { version = "4.5.59", features = ["derive", "env"] }
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
-futures-util = "0.3.31"
+futures-util = "0.3.32"
 hickory-proto = { version = "0.25.2", features = ["https-aws-lc-rs"] } # disable dnssec to fix compile error
 hickory-resolver = { version = "0.25.2", default-features = false, features = ["tokio"] }
 hickory-server = { version = "0.25.2", features = ["https-aws-lc-rs", "h3-aws-lc-rs", "quic-aws-lc-rs"] }
 humantime-serde = "1.1.1"
 itertools = "0.14.0"
 json-subscriber = { version = "0.2.7", features = ["tracing-opentelemetry-0-32"] }
-lru = "0.16.3"
 mimalloc = "0.1.48"
+moka = { version = "0.12.13", features = ["future"] }
 opentelemetry = "0.31.0"
 opentelemetry_sdk = "0.31.0"
 rand = "0.10.0"
