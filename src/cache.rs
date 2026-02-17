@@ -1,26 +1,29 @@
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cidr::IpInet;
-use futures_util::lock::Mutex;
 use hickory_proto::op::Query;
 use hickory_proto::xfer::DnsResponse;
-use lru::LruCache;
+use moka::Expiry;
+use moka::future::Cache as MokaCache;
 
 #[derive(Debug)]
 pub struct Cache {
-    inner: Mutex<CacheInner>,
+    inner: MokaCache<RequestKey, CacheResponse>,
     ipv4_prefix: u8,
     ipv6_prefix: u8,
 }
 
 impl Cache {
     pub fn new(capacity: NonZeroUsize, ipv4_prefix: u8, ipv6_prefix: u8) -> Self {
+        let cache = MokaCache::builder()
+            .max_capacity(capacity.get() as _)
+            .expire_after(TtlExpiry)
+            .build();
+
         Self {
-            inner: Mutex::new(CacheInner {
-                lru_cache: LruCache::new(capacity),
-            }),
+            inner: cache,
             ipv4_prefix,
             ipv6_prefix,
         }
@@ -33,7 +36,7 @@ impl Cache {
         };
 
         let ip_inet = IpInet::new(src_ip, prefix).unwrap().first();
-        self.inner.lock().await.get_response(query, ip_inet)
+        self.get_response(query, ip_inet).await
     }
 
     pub async fn put_cache_response(&self, query: Query, src_ip: IpAddr, response: DnsResponse) {
@@ -43,10 +46,23 @@ impl Cache {
         };
 
         let ip_inet = IpInet::new(src_ip, prefix).unwrap().first();
-        self.inner
-            .lock()
-            .await
-            .add_response(query, ip_inet, response);
+        self.add_response(query, ip_inet, response).await;
+    }
+}
+
+#[derive(Debug)]
+struct TtlExpiry;
+
+impl Expiry<RequestKey, CacheResponse> for TtlExpiry {
+    fn expire_after_create(
+        &self,
+        _key: &RequestKey,
+        value: &CacheResponse,
+        _created_at: Instant,
+    ) -> Option<Duration> {
+        let ttl = Duration::from_secs(value.ttl as _);
+
+        Some(ttl)
     }
 }
 
@@ -56,27 +72,22 @@ struct RequestKey {
     src_ip: IpInet,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CacheResponse {
     response: DnsResponse,
     ttl: u32,
     cache_time: Instant,
 }
 
-#[derive(Debug)]
-struct CacheInner {
-    lru_cache: LruCache<RequestKey, CacheResponse>,
-}
-
-impl CacheInner {
-    fn get_response(&mut self, query: Query, src_ip: IpInet) -> Option<DnsResponse> {
+impl Cache {
+    async fn get_response(&self, query: Query, src_ip: IpInet) -> Option<DnsResponse> {
         let key = RequestKey { query, src_ip };
-        let resp = self.lru_cache.get(&key)?;
+        let resp = self.inner.get(&key).await?;
         let elapsed = resp.cache_time.elapsed().as_secs() as u32;
         let ttl = resp.ttl;
 
         if elapsed >= ttl {
-            self.lru_cache.pop(&key);
+            self.inner.invalidate(&key).await;
 
             None
         } else {
@@ -89,7 +100,7 @@ impl CacheInner {
         }
     }
 
-    fn add_response(&mut self, query: Query, src_ip: IpInet, response: DnsResponse) {
+    async fn add_response(&self, query: Query, src_ip: IpInet, response: DnsResponse) {
         let ttl = match response.answers().iter().map(|record| record.ttl()).min() {
             None => return,
             Some(ttl) => {
@@ -102,13 +113,15 @@ impl CacheInner {
         };
 
         let key = RequestKey { query, src_ip };
-        self.lru_cache.push(
-            key,
-            CacheResponse {
-                response,
-                ttl,
-                cache_time: Instant::now(),
-            },
-        );
+        self.inner
+            .insert(
+                key,
+                CacheResponse {
+                    response,
+                    ttl,
+                    cache_time: Instant::now(),
+                },
+            )
+            .await;
     }
 }
