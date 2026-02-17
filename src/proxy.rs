@@ -293,9 +293,6 @@ impl RequestHandler for DnsHandler {
 impl DnsHandler {
     #[instrument]
     async fn send_request(&self, request: &Request) -> anyhow::Result<DnsResponse> {
-        let src_addr = request.src();
-        let message = self.extract_message(request);
-
         let query = request
             .queries()
             .first()
@@ -303,8 +300,11 @@ impl DnsHandler {
 
         let backend = self
             .route
-            .get_backend(&query.original().name().to_string())
+            .get_backend(query.original().name())
             .unwrap_or(self.default_backend.as_ref());
+
+        let src_addr = request.src();
+        let message = self.extract_message(request);
 
         let response = backend.send_request(message, src_addr).await?;
 

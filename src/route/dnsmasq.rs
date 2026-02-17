@@ -87,6 +87,6 @@ mod tests {
 
         route.import_from_dnsmasq(reader, TestBackend).unwrap();
 
-        assert!(route.get_backend("example.com").is_some());
+        assert!(route.get_backend(&"example.com".parse().unwrap()).is_some());
     }
 }

@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::io::{BufRead, BufReader, Read};
 
-use tracing::{instrument, warn};
+use hickory_proto::rr::Name;
+use tracing::{error, instrument, warn};
 
 use crate::backend::Backend;
 
@@ -112,21 +113,40 @@ impl Route {
         }
     }
 
-    #[instrument(ret)]
-    pub fn get_backend(&self, domain: &str) -> Option<&(dyn Backend + Send + Sync)> {
-        let mut names = domain.split('.').rev().filter(|s| !s.is_empty());
+    #[instrument(skip(self), ret)]
+    pub fn get_backend(&self, name: &Name) -> Option<&(dyn Backend + Send + Sync)> {
+        let mut names = name.iter().rev().filter(|s| !s.is_empty());
         let root = match names.next() {
             None => {
-                warn!(domain, "split domain first name should always exist");
+                warn!("split domain first name should always exist");
 
                 return None;
             }
 
-            Some(root) => root,
+            Some(root) => match str::from_utf8(root) {
+                Err(err) => {
+                    error!(%err, "invalid domain root");
+
+                    return None;
+                }
+
+                Ok(root) => root,
+            },
         };
+
         let mut node = self.nodes.get(root)?;
 
         for name in names {
+            let name = match str::from_utf8(name) {
+                Err(err) => {
+                    error!(%err, "invalid domain name");
+
+                    return None;
+                }
+
+                Ok(name) => name,
+            };
+
             match node.children.get(name) {
                 Some(child) => {
                     node = child;
@@ -178,9 +198,17 @@ mod tests {
 
         route.insert("example.com".to_string(), TestBackend(1));
 
-        assert!(route.get_backend("example.com").is_some());
-        assert!(route.get_backend("www.example.com").is_some());
-        assert!(route.get_backend("www.test.example.com").is_some());
+        assert!(route.get_backend(&"example.com".parse().unwrap()).is_some());
+        assert!(
+            route
+                .get_backend(&"www.example.com".parse().unwrap())
+                .is_some()
+        );
+        assert!(
+            route
+                .get_backend(&"www.test.example.com".parse().unwrap())
+                .is_some()
+        );
     }
 
     #[test]
@@ -189,8 +217,8 @@ mod tests {
 
         route.insert("example.io".to_string(), TestBackend(1));
 
-        assert!(route.get_backend("example.com").is_none());
-        assert!(route.get_backend("io").is_none());
+        assert!(route.get_backend(&"example.com".parse().unwrap()).is_none());
+        assert!(route.get_backend(&"io".parse().unwrap()).is_none());
     }
 
     #[test]
@@ -200,11 +228,27 @@ mod tests {
         route.insert("example.com".to_string(), TestBackend(1));
         route.insert("github.com".to_string(), TestBackend(2));
 
-        assert!(route.get_backend("example.com").is_some());
-        assert!(route.get_backend("www.example.com").is_some());
-        assert!(route.get_backend("www.test.example.com").is_some());
-        assert!(route.get_backend("github.com").is_some());
-        assert!(route.get_backend("www.github.com").is_some());
-        assert!(route.get_backend("www.test.github.com").is_some());
+        assert!(route.get_backend(&"example.com".parse().unwrap()).is_some());
+        assert!(
+            route
+                .get_backend(&"www.example.com".parse().unwrap())
+                .is_some()
+        );
+        assert!(
+            route
+                .get_backend(&"www.test.example.com".parse().unwrap())
+                .is_some()
+        );
+        assert!(route.get_backend(&"github.com".parse().unwrap()).is_some());
+        assert!(
+            route
+                .get_backend(&"www.github.com".parse().unwrap())
+                .is_some()
+        );
+        assert!(
+            route
+                .get_backend(&"www.test.github.com".parse().unwrap())
+                .is_some()
+        );
     }
 }
