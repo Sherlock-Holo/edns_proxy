@@ -31,6 +31,27 @@ pub struct Proxy {
     pub cache: Option<Cache>,
     #[serde(default)]
     pub route: Vec<Route>,
+    #[serde(default)]
+    pub workers: WorkersConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(untagged, rename_all = "snake_case")]
+pub enum WorkersConfig {
+    #[default]
+    Auto,
+    Count(usize),
+}
+
+impl WorkersConfig {
+    pub fn count(&self) -> usize {
+        match self {
+            WorkersConfig::Auto => std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4),
+            WorkersConfig::Count(n) => (*n).max(1),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

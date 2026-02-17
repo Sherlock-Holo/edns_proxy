@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.101"
+async-notify = "0.3.3"
 async-trait = "0.1.89"
 cidr = "0.3.2"
 clap = { version = "4.5.58", features = ["derive", "env"] }
@@ -26,7 +27,8 @@ rustls-native-certs = "0.8.3"
 rustls-pemfile = "2.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9"
-tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
+socket2 = "0.6.2"
+tokio = { version = "1.49.0", features = ["macros", "net", "rt", "signal"] }
 tower = "0.5.3"
 tracing = "0.1.44"
 tracing-appender = "0.2.4"
