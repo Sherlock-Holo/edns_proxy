@@ -63,11 +63,11 @@ const STYLES: styling::Styles = styling::Styles::styled()
 #[derive(Debug, Parser)]
 #[command(styles = STYLES)]
 pub struct Args {
-    #[clap(short, long)]
+    #[clap(short, long, env)]
     /// config path
     config: String,
 
-    #[clap(short, long, default_value = "info")]
+    #[clap(short, long, env, default_value = "info")]
     /// log level
     log_level: LogLevel,
 }
