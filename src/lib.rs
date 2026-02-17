@@ -22,6 +22,7 @@ use tower::Layer;
 use tower::layer::layer_fn;
 use tracing::level_filters::LevelFilter;
 use tracing::{error, instrument};
+use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
 use tracing_log::LogTracer;
 use tracing_subscriber::Registry;
 use tracing_subscriber::filter::Targets;
@@ -97,7 +98,7 @@ impl From<LogLevel> for LevelFilter {
 pub async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    init_log(args.log_level);
+    let _guard = init_log(args.log_level);
     init_tls_provider();
 
     let config = Config::read(&args.config)?;
@@ -472,21 +473,28 @@ async fn signal_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_log(level: LogLevel) {
+fn init_log(level: LogLevel) -> WorkerGuard {
+    let (writer, guard) = NonBlockingBuilder::default()
+        .lossy(false)
+        .buffered_lines_limit(512_000)
+        .finish(io::stderr());
+
     if io::stderr().is_terminal() {
-        init_console_log(level);
+        init_console_log(level, writer);
     } else {
-        init_json_log(level);
+        init_json_log(level, writer);
     }
 
     let _ = LogTracer::init();
+
+    guard
 }
 
-fn init_console_log(level: LogLevel) {
+fn init_console_log(level: LogLevel, writer: NonBlocking) {
     let layer = tracing_subscriber::fmt::layer()
         .pretty()
         .with_line_number(true)
-        .with_writer(io::stderr)
+        .with_writer(writer)
         .with_target(true);
 
     let targets = Targets::new().with_default(LevelFilter::TRACE);
@@ -498,12 +506,12 @@ fn init_console_log(level: LogLevel) {
         .init();
 }
 
-fn init_json_log(level: LogLevel) {
+fn init_json_log(level: LogLevel, writer: NonBlocking) {
     let tracer = SdkTracerProvider::builder().build().tracer("edns_proxy");
     let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
     let json = json_subscriber::layer()
-        .with_writer(io::stderr)
+        .with_writer(writer)
         .with_current_span(false)
         .with_span_list(false)
         .with_line_number(true)
