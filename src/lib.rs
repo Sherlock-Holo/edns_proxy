@@ -3,7 +3,11 @@ use std::fs::File;
 use std::io;
 use std::io::{BufReader, IsTerminal};
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::thread;
 
+use async_notify::Notify;
 use clap::builder::styling;
 use clap::{Parser, ValueEnum};
 use futures_util::{FutureExt, select};
@@ -16,6 +20,7 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio::runtime::Builder;
 use tokio::signal::unix;
 use tokio::signal::unix::SignalKind;
 use tower::Layer;
@@ -36,12 +41,16 @@ use crate::backend::{
 };
 use crate::cache::Cache;
 use crate::config::{
-    BackendDetail, Bind, BootstrapOrAddrs, Config, Filter, HttpsBasedBind, RouteType, TcpBind,
-    TlsBasedBind, UdpBind,
+    BackendDetail, Bind, BootstrapOrAddrs, Config, Filter, HttpsBasedBind, Proxy, RouteType,
+    TcpBind, TlsBasedBind, UdpBind,
 };
 use crate::filter::ecs::EcsFilterLayer;
 use crate::filter::static_ecs::StaticEcsFilterLayer;
 use crate::layer::LayerBuilder;
+use crate::proxy::{
+    BindSocket, SocketType, create_tcp_listener_reuse_port, create_udp_socket_reuse_port,
+    socket_type_for_bind, start_proxy_with_socket,
+};
 use crate::route::{Route, dnsmasq::DnsmasqExt};
 
 mod addr;
@@ -102,62 +111,15 @@ pub async fn run() -> anyhow::Result<()> {
     init_tls_provider();
 
     let config = Config::read(&args.config)?;
-
     let backends = collect_backends(config.backend).await?;
-
-    let mut tasks = Vec::with_capacity(config.proxy.len());
-    for proxy in config.proxy {
-        let default_backend = backends
-            .get(&proxy.backend)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
-        let default_backend = filter_backend(proxy.filter, default_backend);
-        let bind_addr = create_bind_addr(proxy.bind)?;
-
-        let mut route = Route::default();
-        for route_config in proxy.route {
-            let backend = backends
-                .get(&route_config.backend)
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", route_config.backend))?;
-            let backend = filter_backend(route_config.filter, backend);
-
-            match route_config.route_type {
-                RouteType::Normal { path } => {
-                    let file = File::open(path)
-                        .inspect_err(|err| error!(%err, "open normal file failed"))?;
-                    route.import(file, backend)?;
-                }
-
-                RouteType::Dnsmasq { path } => {
-                    let file = File::open(path)
-                        .inspect_err(|err| error!(%err, "open dnsmasq file failed"))?;
-                    route.import_from_dnsmasq(file, backend)?;
-                }
-            }
-        }
-
-        let task = proxy::start_proxy(
-            bind_addr,
-            route,
-            default_backend,
-            proxy.cache.map(|cache| {
-                Cache::new(
-                    cache.capacity,
-                    cache.ipv4_fuzz_prefix,
-                    cache.ipv6_fuzz_prefix,
-                )
-            }),
-        )
-        .await?;
-        tasks.push(task);
-    }
+    let (join_handles, shutdown_notify, threads) = spawn_proxy_workers(config.proxy, backends)?;
 
     signal_stop().await?;
 
-    for mut task in tasks {
-        if let Err(err) = task.stop().await {
-            error!(%err, "stop proxy failed");
+    shutdown_notify.notify_n(NonZeroUsize::new(threads).unwrap());
+    for handle in join_handles {
+        if let Ok(Err(err)) = handle.join() {
+            error!(%err, "worker thread failed");
         }
     }
 
@@ -300,6 +262,98 @@ async fn collect_backends(
     }
 
     Ok(backends)
+}
+
+type SpawnResult = (
+    Vec<thread::JoinHandle<anyhow::Result<()>>>,
+    Arc<Notify>,
+    usize,
+);
+
+fn spawn_proxy_workers(
+    proxy_configs: Vec<Proxy>,
+    backends: HashMap<String, DynBackend>,
+) -> anyhow::Result<SpawnResult> {
+    let mut join_handles = Vec::new();
+    let shutdown_notify = Arc::new(Notify::new());
+
+    let mut threads = 0;
+    for proxy in proxy_configs {
+        let default_backend = backends
+            .get(&proxy.backend)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", proxy.backend))?;
+        let default_backend = filter_backend(proxy.filter, default_backend);
+        let bind_addr = create_bind_addr(proxy.bind)?;
+
+        let mut route = Route::default();
+        for route_config in proxy.route {
+            let backend = backends
+                .get(&route_config.backend)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("backend '{}' not found", route_config.backend))?;
+            let backend = filter_backend(route_config.filter, backend);
+
+            match route_config.route_type {
+                RouteType::Normal { path } => {
+                    let file = File::open(path)
+                        .inspect_err(|err| error!(%err, "open normal file failed"))?;
+                    route.import(file, backend)?;
+                }
+
+                RouteType::Dnsmasq { path } => {
+                    let file = File::open(path)
+                        .inspect_err(|err| error!(%err, "open dnsmasq file failed"))?;
+                    route.import_from_dnsmasq(file, backend)?;
+                }
+            }
+        }
+
+        let n = proxy.workers.count();
+        threads += n;
+
+        let route = Arc::new(route);
+        let bind_addr = Arc::new(bind_addr);
+        let cache_config = proxy
+            .cache
+            .map(|c| (c.capacity, c.ipv4_fuzz_prefix, c.ipv6_fuzz_prefix));
+        let backend_clones: Vec<_> = (0..n).map(|_| default_backend.clone()).collect();
+
+        for backend in backend_clones {
+            let shutdown = Arc::clone(&shutdown_notify);
+            let route = Arc::clone(&route);
+            let bind_addr = Arc::clone(&bind_addr);
+
+            let handle = thread::spawn(move || {
+                let rt = Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap_or_else(|err| panic!("build runtime failed: {err}"));
+
+                rt.block_on(async move {
+                    let socket = match socket_type_for_bind(&bind_addr) {
+                        SocketType::Udp => {
+                            BindSocket::Udp(create_udp_socket_reuse_port(bind_addr.addr())?)
+                        }
+                        SocketType::Tcp => {
+                            BindSocket::Tcp(create_tcp_listener_reuse_port(bind_addr.addr())?)
+                        }
+                    };
+
+                    let cache = cache_config.map(|(cap, v4, v6)| Cache::new(cap, v4, v6));
+
+                    let task =
+                        start_proxy_with_socket(bind_addr, socket, route, backend, cache).await?;
+
+                    task.run_until_shutdown(shutdown).await
+                })
+            });
+
+            join_handles.push(handle);
+        }
+    }
+
+    Ok((join_handles, shutdown_notify, threads))
 }
 
 fn filter_backend<B: Backend + Send + Sync + 'static>(

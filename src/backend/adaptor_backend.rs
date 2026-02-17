@@ -117,11 +117,12 @@ impl Backend for AdaptorBackend {
     }
 }
 
-/// 协调并发重建：同一时刻只有一人在重建，其余等待；重建失败时由等待者之一继续。
+/// Coordinates concurrent rebuild: only one task rebuilds at a time, others wait;
+/// if rebuild fails, one of the waiters continues.
 struct RebuildCoordinator {
-    /// 是否有人正在重建
+    /// Whether someone is currently rebuilding
     in_progress: bool,
-    /// 重建完成后的结果，供等待者读取
+    /// Result after rebuild completes, for waiters to read
     result: anyhow::Result<()>,
 }
 
@@ -150,8 +151,8 @@ impl Inner {
         Ok(())
     }
 
-    /// 确保连接已重建。若有人在重建则等待；若无人重建则执行重建。
-    /// 重建失败时，等待者之一会继续竞争并重建，直到成功或返回错误。
+    /// Ensure connection is rebuilt. If someone is rebuilding, wait; otherwise perform the rebuild.
+    /// When rebuild fails, one of the waiters will compete and rebuild again until success or return an error.
     async fn ensure_rebuilt(&self, attempts: usize) -> anyhow::Result<()> {
         loop {
             let build_by_me = {
