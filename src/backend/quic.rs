@@ -9,7 +9,7 @@ use rand::prelude::*;
 use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
 
-use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
+use crate::backend::adaptor_backend::{DnsRequestSenderBuild, DynDnsRequestSender};
 
 #[derive(Debug, Clone)]
 pub struct QuicBuilder {
@@ -49,7 +49,7 @@ impl QuicBuilder {
 
 #[async_trait]
 impl DnsRequestSenderBuild for QuicBuilder {
-    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
+    async fn build(&self) -> anyhow::Result<DynDnsRequestSender> {
         let addr = self
             .inner
             .addrs
@@ -65,7 +65,7 @@ impl DnsRequestSenderBuild for QuicBuilder {
             .build(addr, self.inner.host.clone())
             .await?;
 
-        Ok(BoxDnsRequestSender::new(quic_client_stream))
+        Ok(DynDnsRequestSender::new_with_clone(quic_client_stream))
     }
 }
 
@@ -88,12 +88,14 @@ impl Debug for QuicBuilderInner {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
+    use super::super::tests::*;
     use super::*;
-    use crate::backend::tests::{check_dns_response, create_query_message};
     use crate::backend::{AdaptorBackend, Backend};
 
     #[tokio::test]
     async fn test() {
+        init_tls_provider();
+
         let https_builder = QuicBuilder::new(
             ["45.90.28.1:853".parse().unwrap()].into(),
             "dns.nextdns.io".to_string(),

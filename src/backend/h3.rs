@@ -10,7 +10,7 @@ use rand::prelude::*;
 use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
 
-use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
+use crate::backend::adaptor_backend::{DnsRequestSenderBuild, DynDnsRequestSender};
 
 #[derive(Debug, Clone)]
 pub struct H3Builder {
@@ -55,7 +55,7 @@ impl H3Builder {
 
 #[async_trait]
 impl DnsRequestSenderBuild for H3Builder {
-    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
+    async fn build(&self) -> anyhow::Result<DynDnsRequestSender> {
         let addr = self
             .inner
             .addrs
@@ -76,7 +76,7 @@ impl DnsRequestSenderBuild for H3Builder {
             .await?
             .ok_or_else(|| anyhow::anyhow!("h3 stream connected but closed immediately"))?;
 
-        Ok(BoxDnsRequestSender::new(h3_client_stream))
+        Ok(DynDnsRequestSender::new_with_clone(h3_client_stream))
     }
 }
 
@@ -101,12 +101,14 @@ impl Debug for H3BuilderInner {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
+    use super::super::tests::*;
     use super::*;
-    use crate::backend::tests::{check_dns_response, create_query_message};
     use crate::backend::{AdaptorBackend, Backend};
 
     #[tokio::test]
     async fn test() {
+        init_tls_provider();
+
         let https_builder = H3Builder::new(
             ["45.90.28.1:443".parse().unwrap()].into(),
             "dns.nextdns.io".to_string(),

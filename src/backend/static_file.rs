@@ -11,9 +11,9 @@ use hickory_proto::ProtoError;
 use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
 use hickory_proto::xfer::{DnsRequest, DnsRequestSender, DnsResponse, DnsResponseStream};
-use tracing::{debug, info, instrument};
+use tracing::{info, instrument};
 
-use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
+use crate::backend::adaptor_backend::{DnsRequestSenderBuild, DynDnsRequestSender};
 use crate::config::StaticFileBackendConfig;
 
 const DEFAULT_TTL: u32 = 3600; // 1 hour
@@ -105,15 +105,17 @@ impl StaticFileBuilder {
 
 #[async_trait]
 impl DnsRequestSenderBuild for StaticFileBuilder {
-    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
-        Ok(BoxDnsRequestSender::new(StaticFileDnsRequestSender {
-            inner: self.inner.clone(),
-            shutdown: false,
-        }))
+    async fn build(&self) -> anyhow::Result<DynDnsRequestSender> {
+        Ok(DynDnsRequestSender::new_with_clone(
+            StaticFileDnsRequestSender {
+                inner: self.inner.clone(),
+                shutdown: false,
+            },
+        ))
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StaticFileDnsRequestSender {
     inner: Arc<StaticFileInner>,
     shutdown: bool,
@@ -132,6 +134,7 @@ impl Stream for StaticFileDnsRequestSender {
 }
 
 impl DnsRequestSender for StaticFileDnsRequestSender {
+    #[instrument(skip(self), fields(request = ?&*request))]
     fn send_message(&mut self, request: DnsRequest) -> DnsResponseStream {
         let (message, _options) = request.into_parts();
 
@@ -145,7 +148,7 @@ impl DnsRequestSender for StaticFileDnsRequestSender {
         let query_name = query.name();
         let query_type = query.query_type();
 
-        debug!("Static backend lookup: {} {}", query_name, query_type);
+        info!("Static backend lookup: {} {}", query_name, query_type);
 
         let mut response = Message::new();
         response.set_id(message.id());
@@ -243,11 +246,25 @@ fn normalize_domain_str(input: &mut str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use hickory_proto::op::Query;
-    use hickory_proto::xfer::{DnsRequestOptions, FirstAnswer};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use hickory_proto::op::{Message, Query};
 
     use super::*;
+    use crate::backend::Backend;
+    use crate::backend::adaptor_backend::AdaptorBackend;
     use crate::config::StaticRecord;
+
+    fn create_query_message(domain: &str, record_type: RecordType) -> Message {
+        let mut message = Message::new();
+        message.add_query(Query::query(Name::from_utf8(domain).unwrap(), record_type));
+        message.set_recursion_desired(true);
+        message
+    }
+
+    fn dummy_socket_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234)
+    }
 
     #[tokio::test]
     async fn test_exact_match() {
@@ -259,16 +276,13 @@ mod tests {
         };
 
         let builder = StaticFileBuilder::new(config).unwrap();
-        let mut sender = builder.build().await.unwrap();
+        let backend = AdaptorBackend::new(builder, 3).await.unwrap();
 
-        let mut message = Message::new();
-        message.add_query(Query::query(
-            Name::from_utf8("example.com").unwrap(),
-            RecordType::A,
-        ));
-
-        let request = DnsRequest::new(message, DnsRequestOptions::default());
-        let response = sender.send_message(request).first_answer().await.unwrap();
+        let message = create_query_message("example.com", RecordType::A);
+        let response = backend
+            .send_request(message, dummy_socket_addr())
+            .await
+            .unwrap();
 
         assert_eq!(response.answers().len(), 1);
         let record = &response.answers()[0];
@@ -290,36 +304,30 @@ mod tests {
         };
 
         let builder = StaticFileBuilder::new(config).unwrap();
-        let mut sender = builder.build().await.unwrap();
+        let backend = AdaptorBackend::new(builder, 3).await.unwrap();
 
         // Test test.com
-        let mut message = Message::new();
-        message.add_query(Query::query(
-            Name::from_utf8("test.com").unwrap(),
-            RecordType::A,
-        ));
-        let request = DnsRequest::new(message, DnsRequestOptions::default());
-        let response = sender.send_message(request).first_answer().await.unwrap();
+        let message = create_query_message("test.com", RecordType::A);
+        let response = backend
+            .send_request(message, dummy_socket_addr())
+            .await
+            .unwrap();
         assert_eq!(response.answers().len(), 1);
 
         // Test a.test.com
-        let mut message = Message::new();
-        message.add_query(Query::query(
-            Name::from_utf8("a.test.com").unwrap(),
-            RecordType::A,
-        ));
-        let request = DnsRequest::new(message, DnsRequestOptions::default());
-        let response = sender.send_message(request).first_answer().await.unwrap();
+        let message = create_query_message("a.test.com", RecordType::A);
+        let response = backend
+            .send_request(message, dummy_socket_addr())
+            .await
+            .unwrap();
         assert_eq!(response.answers().len(), 1);
 
         // Test a.b.test.com
-        let mut message = Message::new();
-        message.add_query(Query::query(
-            Name::from_utf8("a.b.test.com").unwrap(),
-            RecordType::A,
-        ));
-        let request = DnsRequest::new(message, DnsRequestOptions::default());
-        let response = sender.send_message(request).first_answer().await.unwrap();
+        let message = create_query_message("a.b.test.com", RecordType::A);
+        let response = backend
+            .send_request(message, dummy_socket_addr())
+            .await
+            .unwrap();
         assert_eq!(response.answers().len(), 1);
     }
 
@@ -333,16 +341,13 @@ mod tests {
         };
 
         let builder = StaticFileBuilder::new(config).unwrap();
-        let mut sender = builder.build().await.unwrap();
+        let backend = AdaptorBackend::new(builder, 3).await.unwrap();
 
-        let mut message = Message::new();
-        message.add_query(Query::query(
-            Name::from_utf8("other.com").unwrap(),
-            RecordType::A,
-        ));
-
-        let request = DnsRequest::new(message, DnsRequestOptions::default());
-        let response = sender.send_message(request).first_answer().await.unwrap();
+        let message = create_query_message("other.com", RecordType::A);
+        let response = backend
+            .send_request(message, dummy_socket_addr())
+            .await
+            .unwrap();
 
         assert_eq!(response.response_code(), ResponseCode::NXDomain);
         assert_eq!(response.answers().len(), 0);
@@ -358,16 +363,13 @@ mod tests {
         };
 
         let builder = StaticFileBuilder::new(config).unwrap();
-        let mut sender = builder.build().await.unwrap();
+        let backend = AdaptorBackend::new(builder, 3).await.unwrap();
 
-        let mut message = Message::new();
-        message.add_query(Query::query(
-            Name::from_utf8("example.com").unwrap(),
-            RecordType::A,
-        ));
-
-        let request = DnsRequest::new(message, DnsRequestOptions::default());
-        let response = sender.send_message(request).first_answer().await.unwrap();
+        let message = create_query_message("example.com", RecordType::A);
+        let response = backend
+            .send_request(message, dummy_socket_addr())
+            .await
+            .unwrap();
 
         assert_eq!(response.answers().len(), 2);
     }
@@ -382,16 +384,13 @@ mod tests {
         };
 
         let builder = StaticFileBuilder::new(config).unwrap();
-        let mut sender = builder.build().await.unwrap();
+        let backend = AdaptorBackend::new(builder, 3).await.unwrap();
 
-        let mut message = Message::new();
-        message.add_query(Query::query(
-            Name::from_utf8("example.com").unwrap(),
-            RecordType::AAAA,
-        ));
-
-        let request = DnsRequest::new(message, DnsRequestOptions::default());
-        let response = sender.send_message(request).first_answer().await.unwrap();
+        let message = create_query_message("example.com", RecordType::AAAA);
+        let response = backend
+            .send_request(message, dummy_socket_addr())
+            .await
+            .unwrap();
 
         assert_eq!(response.answers().len(), 1);
         let record = &response.answers()[0];

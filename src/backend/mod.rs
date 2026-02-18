@@ -13,6 +13,7 @@ mod quic;
 mod static_file;
 mod tls;
 mod udp;
+// mod tracing_dns_exchange;
 
 pub use adaptor_backend::AdaptorBackend;
 pub use group::Group;
@@ -62,6 +63,7 @@ impl<B: Backend + Sync + Send + ?Sized> Backend for Box<B> {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::sync::Once;
 
     use hickory_proto::op::{Message, Query};
     use hickory_proto::rr::{Name, RData, RecordType};
@@ -90,5 +92,17 @@ mod tests {
                 _ => false,
             }
         }));
+    }
+
+    pub fn init_tls_provider() {
+        static INSTALL_ONCE: Once = Once::new();
+
+        INSTALL_ONCE.call_once(|| {
+            let provider = rustls::crypto::aws_lc_rs::default_provider();
+
+            provider
+                .install_default()
+                .expect("install crypto provider should succeed");
+        })
     }
 }

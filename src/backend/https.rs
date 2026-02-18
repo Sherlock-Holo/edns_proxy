@@ -11,7 +11,7 @@ use rand::prelude::*;
 use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
 
-use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
+use crate::backend::adaptor_backend::{DnsRequestSenderBuild, DynDnsRequestSender};
 
 #[derive(Debug, Clone)]
 pub struct HttpsBuilder {
@@ -56,7 +56,7 @@ impl HttpsBuilder {
 
 #[async_trait]
 impl DnsRequestSenderBuild for HttpsBuilder {
-    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
+    async fn build(&self) -> anyhow::Result<DynDnsRequestSender> {
         let addr = self
             .inner
             .addrs
@@ -77,7 +77,7 @@ impl DnsRequestSenderBuild for HttpsBuilder {
             .await?
             .ok_or_else(|| anyhow::anyhow!("https stream connected but closed immediately"))?;
 
-        Ok(BoxDnsRequestSender::new(https_client_stream))
+        Ok(DynDnsRequestSender::new_with_clone(https_client_stream))
     }
 }
 
@@ -109,6 +109,8 @@ mod tests {
 
     #[tokio::test]
     async fn test() {
+        init_tls_provider();
+
         let https_builder = HttpsBuilder::new(
             ["1.12.12.21:443".parse().unwrap()].into(),
             "doh.pub".to_string(),

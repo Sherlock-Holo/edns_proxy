@@ -1,15 +1,22 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures_util::{Stream, StreamExt};
+use hickory_proto::ProtoError;
 use hickory_proto::runtime::TokioRuntimeProvider;
 use hickory_proto::udp::UdpClientStream;
+use hickory_proto::xfer::{DnsRequest, DnsRequestSender, DnsResponseStream};
 use rand::prelude::*;
 use rand::rng;
 
-use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
+use crate::backend::adaptor_backend::{
+    DnsRequestSenderBuild, DynDnsRequestSender, ToDynDnsRequestSender,
+};
 
 #[derive(Debug, Clone)]
 pub struct UdpBuilder {
@@ -28,7 +35,7 @@ impl UdpBuilder {
 
 #[async_trait]
 impl DnsRequestSenderBuild for UdpBuilder {
-    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
+    async fn build(&self) -> anyhow::Result<DynDnsRequestSender> {
         let addr = self
             .addrs
             .iter()
@@ -40,7 +47,59 @@ impl DnsRequestSenderBuild for UdpBuilder {
             .build()
             .await?;
 
-        Ok(BoxDnsRequestSender::new(udp_client_stream))
+        Ok(DynDnsRequestSender::new(WrapUdpClientStream {
+            builder: self.clone(),
+            udp_client_stream,
+        }))
+    }
+}
+
+struct WrapUdpClientStream {
+    builder: UdpBuilder,
+    udp_client_stream: UdpClientStream<TokioRuntimeProvider>,
+}
+
+impl Stream for WrapUdpClientStream {
+    type Item = Result<(), ProtoError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.udp_client_stream.poll_next_unpin(cx)
+    }
+}
+
+impl DnsRequestSender for WrapUdpClientStream {
+    fn send_message(&mut self, request: DnsRequest) -> DnsResponseStream {
+        self.udp_client_stream.send_message(request)
+    }
+
+    fn shutdown(&mut self) {
+        self.udp_client_stream.shutdown()
+    }
+
+    fn is_shutdown(&self) -> bool {
+        self.udp_client_stream.is_shutdown()
+    }
+}
+
+#[async_trait]
+impl ToDynDnsRequestSender for WrapUdpClientStream {
+    async fn to_dyn_dns_request_sender(&self) -> anyhow::Result<Box<dyn DnsRequestSender>> {
+        let addr = self
+            .builder
+            .addrs
+            .iter()
+            .choose(&mut rng())
+            .expect("addrs must not empty");
+
+        let udp_client_stream = UdpClientStream::builder(*addr, TokioRuntimeProvider::new())
+            .with_timeout(self.builder.timeout)
+            .build()
+            .await?;
+
+        Ok(Box::new(WrapUdpClientStream {
+            builder: self.builder.clone(),
+            udp_client_stream,
+        }))
     }
 }
 

@@ -1,22 +1,17 @@
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex, RwLock};
-use std::task::{Context, Poll};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_notify::Notify;
 use async_trait::async_trait;
-use futures_util::{Stream, StreamExt};
-use hickory_proto::DnsHandle;
+use futures_util::TryStreamExt;
 use hickory_proto::op::Message;
-use hickory_proto::runtime::TokioTime;
 use hickory_proto::xfer::{
-    DnsExchange, DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse, DnsResponseStream,
-    FirstAnswer,
+    DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse, FirstAnswer,
 };
-use hickory_proto::{ProtoError, RetryDnsHandle};
+use tokio::sync::RwLock;
 use tracing::{error, instrument};
 
 use crate::backend::{Backend, DynBackend};
@@ -24,43 +19,29 @@ use crate::utils::TimeoutExt;
 
 const BUILD_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub struct BoxDnsRequestSender(Pin<Box<dyn DnsRequestSender + 'static + Send + Unpin>>);
-
-impl Stream for BoxDnsRequestSender {
-    type Item = Result<(), ProtoError>;
-
-    #[inline]
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.0.poll_next_unpin(cx)
-    }
+pub struct DynDnsRequestSender {
+    inner: Box<dyn ToDynDnsRequestSender>,
 }
 
-impl DnsRequestSender for BoxDnsRequestSender {
+impl DynDnsRequestSender {
     #[inline]
-    fn send_message(&mut self, request: DnsRequest) -> DnsResponseStream {
-        self.0.as_mut().send_message(request)
+    pub fn new_with_clone<S: DnsRequestSender + Clone + Sync>(sender: S) -> Self {
+        Self {
+            inner: Box::new(sender),
+        }
     }
 
     #[inline]
-    fn shutdown(&mut self) {
-        self.0.as_mut().shutdown()
-    }
-
-    #[inline]
-    fn is_shutdown(&self) -> bool {
-        self.0.as_ref().is_shutdown()
-    }
-}
-
-impl BoxDnsRequestSender {
-    pub fn new(sender: impl DnsRequestSender + 'static) -> Self {
-        BoxDnsRequestSender(Box::pin(sender))
+    pub fn new<S: ToDynDnsRequestSender>(sender: S) -> Self {
+        Self {
+            inner: Box::new(sender),
+        }
     }
 }
 
 #[async_trait]
 pub trait DnsRequestSenderBuild {
-    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender>;
+    async fn build(&self) -> anyhow::Result<DynDnsRequestSender>;
 }
 
 #[derive(Debug, Clone)]
@@ -76,14 +57,10 @@ impl AdaptorBackend {
     ) -> anyhow::Result<Self> {
         let dns_request_sender = builder.build().await?;
 
-        let (exchange, background_task) =
-            DnsExchange::from_stream::<_, TokioTime>(dns_request_sender);
-        tokio::spawn(background_task);
-
         Ok(Self {
             inner: Arc::new(Inner {
                 builder: Box::new(builder),
-                exchange: RwLock::new(RetryDnsHandle::new(exchange, attempts)),
+                dyn_sender: RwLock::new(dns_request_sender),
                 rebuild: Mutex::new(RebuildCoordinator {
                     in_progress: false,
                     result: Ok(()), // make it ok when init
@@ -103,14 +80,19 @@ impl Backend for AdaptorBackend {
         message: Message,
         _src: SocketAddr,
     ) -> anyhow::Result<DnsResponse> {
-        loop {
+        for _ in 0..self.attempts {
             match self.inner.do_query(message.clone()).await {
                 Ok(resp) => return Ok(resp),
                 Err(_) => {
-                    self.inner.ensure_rebuilt(self.attempts).await?;
+                    self.inner.ensure_rebuilt().await?;
                 }
             }
         }
+
+        Err(anyhow::anyhow!(
+            "send request failed {} times",
+            self.attempts
+        ))
     }
 
     fn to_dyn_clone(&self) -> DynBackend {
@@ -129,7 +111,7 @@ struct RebuildCoordinator {
 
 struct Inner {
     builder: Box<dyn DnsRequestSenderBuild + Sync + Send + 'static>,
-    exchange: RwLock<RetryDnsHandle<DnsExchange>>,
+    dyn_sender: RwLock<DynDnsRequestSender>,
     rebuild: Mutex<RebuildCoordinator>,
     rebuild_done: Notify,
 }
@@ -141,20 +123,20 @@ impl Debug for Inner {
 }
 
 impl Inner {
-    async fn update_exchange(&self, attempts: usize) -> anyhow::Result<()> {
+    #[instrument(skip(self), ret, err)]
+    async fn update_exchange(&self) -> anyhow::Result<()> {
         let sender = self.builder.build().timeout(BUILD_TIMEOUT).await??;
 
-        let (exchange, background_task) = DnsExchange::from_stream::<_, TokioTime>(sender);
-        tokio::spawn(background_task);
-
-        *self.exchange.write().unwrap() = RetryDnsHandle::new(exchange, attempts);
+        *self.dyn_sender.write().await = sender;
 
         Ok(())
     }
 
     /// Ensure connection is rebuilt. If someone is rebuilding, wait; otherwise perform the rebuild.
-    /// When rebuild fails, one of the waiters will compete and rebuild again until success or return an error.
-    async fn ensure_rebuilt(&self, attempts: usize) -> anyhow::Result<()> {
+    /// When rebuild fails, one of the waiters will compete and rebuild again until success or
+    /// return an error.
+    #[instrument(skip(self), ret, err)]
+    async fn ensure_rebuilt(&self) -> anyhow::Result<()> {
         loop {
             let build_by_me = {
                 let mut guard = self.rebuild.lock().unwrap();
@@ -167,7 +149,7 @@ impl Inner {
             };
 
             if build_by_me {
-                let result = self.update_exchange(attempts).await;
+                let result = self.update_exchange().await;
                 let result_for_waiters = result
                     .as_ref()
                     .map(|_| ())
@@ -197,12 +179,36 @@ impl Inner {
 
     #[instrument(skip(self), ret, err)]
     async fn do_query(&self, message: Message) -> anyhow::Result<DnsResponse> {
+        let mut sender = self
+            .dyn_sender
+            .read()
+            .await
+            .inner
+            .to_dyn_dns_request_sender()
+            .await?;
+
+        sender
+            .try_next()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("sender dropped"))?;
+
         let mut options = DnsRequestOptions::default();
         options.use_edns = true;
         let request = DnsRequest::new(message, options);
-        let exchange = self.exchange.read().unwrap().clone();
-        let response = exchange.send(request).first_answer().await?;
+        let dns_response = sender.send_message(request).first_answer().await?;
 
-        Ok(response)
+        Ok(dns_response)
+    }
+}
+
+#[async_trait]
+pub trait ToDynDnsRequestSender: DnsRequestSender + Sync {
+    async fn to_dyn_dns_request_sender(&self) -> anyhow::Result<Box<dyn DnsRequestSender>>;
+}
+
+#[async_trait]
+impl<T: DnsRequestSender + Clone + Sync> ToDynDnsRequestSender for T {
+    async fn to_dyn_dns_request_sender(&self) -> anyhow::Result<Box<dyn DnsRequestSender>> {
+        Ok(Box::new(self.clone()))
     }
 }
