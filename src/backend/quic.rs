@@ -13,7 +13,7 @@ use hickory_proto::xfer::{
 use rand::prelude::*;
 use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
-use tracing::instrument;
+use tracing::{Instrument, info_span, instrument};
 
 use crate::backend::Backend;
 
@@ -70,19 +70,25 @@ impl QuicBackend {
             .map_err(Into::into)
     }
 
+    #[instrument(skip(stream), ret, err)]
     async fn do_send_with_stream(
         stream: &mut QuicClientStream,
         message: Message,
     ) -> anyhow::Result<DnsResponse> {
         stream
             .try_next()
+            .instrument(info_span!("wait_stream_ready"))
             .await?
             .ok_or_else(|| anyhow::anyhow!("quic stream connected but closed immediately"))?;
 
         let mut options = DnsRequestOptions::default();
         options.use_edns = true;
         let request = DnsRequest::new(message, options);
-        let dns_response = stream.send_message(request).first_answer().await?;
+        let dns_response = stream
+            .send_message(request)
+            .first_answer()
+            .instrument(info_span!("first_answer"))
+            .await?;
 
         Ok(dns_response)
     }
