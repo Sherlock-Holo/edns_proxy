@@ -90,6 +90,7 @@ impl StaticFileBackend {
         })
     }
 
+    #[instrument(skip(self), ret, err)]
     fn lookup_and_build_response(&self, message: Message) -> anyhow::Result<DnsResponse> {
         let query = message
             .queries()
@@ -135,9 +136,7 @@ impl StaticFileBackend {
         let mut query_key = query_key.0.to_string();
         let query_trimmed = normalize_domain_str(&mut query_key);
         for (suffix, rdata_list) in self.inner.wildcard_matches.iter() {
-            let wildcard_hit =
-                query_trimmed == *suffix || query_trimmed.ends_with(&format!(".{suffix}"));
-            if wildcard_hit {
+            if query_trimmed == *suffix || query_trimmed.ends_with(suffix) {
                 let filtered = Self::filter_by_type(rdata_list, query_type);
                 if !filtered.is_empty() {
                     return Some(filtered);
@@ -148,6 +147,7 @@ impl StaticFileBackend {
         None
     }
 
+    #[inline]
     fn filter_by_type(ips: &[RData], query_type: RecordType) -> Vec<RData> {
         match query_type {
             RecordType::A => ips
@@ -155,11 +155,13 @@ impl StaticFileBackend {
                 .filter(|ip| matches!(ip, RData::A(_)))
                 .cloned()
                 .collect(),
+
             RecordType::AAAA => ips
                 .iter()
                 .filter(|ip| matches!(ip, RData::AAAA(_)))
                 .cloned()
                 .collect(),
+
             _ => ips.to_vec(),
         }
     }
@@ -172,7 +174,6 @@ fn normalize_domain_str(input: &mut str) -> &str {
 
 #[async_trait]
 impl Backend for StaticFileBackend {
-    #[instrument(skip(self), ret, err)]
     async fn send_request(
         &self,
         message: Message,

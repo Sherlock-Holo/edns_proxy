@@ -16,7 +16,7 @@ pub trait DnsmasqExt {
 }
 
 impl DnsmasqExt for Route {
-    #[instrument(err, skip(reader))]
+    #[instrument(skip(self, reader), ret, err)]
     fn import_from_dnsmasq<R: Read>(
         &mut self,
         reader: R,

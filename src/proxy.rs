@@ -348,7 +348,7 @@ impl DnsHandler {
             })
     }
 
-    #[instrument(skip(self), ret)]
+    #[instrument(skip_all)]
     fn extract_message(&self, request: &Request) -> Message {
         let mut message = Message::new();
         message.set_header(*request.header());
@@ -377,6 +377,7 @@ impl DnsHandler {
         message
     }
 
+    #[inline]
     #[instrument(skip(self), ret)]
     async fn try_get_cache_response(&self, request: &Request) -> Option<DnsResponse> {
         let cache = self.cache.as_ref()?;
