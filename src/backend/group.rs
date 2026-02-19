@@ -49,8 +49,4 @@ impl Backend for Group {
 
         backend.send_request(message, src).await
     }
-
-    fn to_dyn_clone(&self) -> DynBackend {
-        Box::new(self.clone())
-    }
 }

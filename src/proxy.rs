@@ -18,7 +18,7 @@ use tokio::net::{TcpListener, TcpSocket, UdpSocket};
 use tracing::{error, info, instrument};
 
 use crate::addr::BindAddr;
-use crate::backend::Backend;
+use crate::backend::DynBackend;
 use crate::cache::Cache;
 use crate::route::Route;
 
@@ -84,16 +84,16 @@ impl ProxyTask {
 
 /// Starts proxy with a pre-created socket (SO_REUSEPORT). Used for per-core workers.
 #[instrument(err)]
-pub async fn start_proxy_with_socket<B: Backend + Send + Sync + 'static>(
+pub async fn start_proxy_with_socket(
     bind_addr: Arc<BindAddr>,
     socket: BindSocket,
     route: Arc<Route>,
-    default_backend: B,
+    default_backend: crate::backend::DynBackend,
     cache: Option<Cache>,
 ) -> anyhow::Result<ProxyTask> {
     let mut server = ServerFuture::new(DnsHandler {
         cache,
-        default_backend: Box::new(default_backend),
+        default_backend,
         route,
     });
 
@@ -239,7 +239,7 @@ impl BindAddr {
 #[derive(Debug)]
 struct DnsHandler {
     cache: Option<Cache>,
-    default_backend: Box<dyn Backend + Send + Sync>,
+    default_backend: DynBackend,
     route: Arc<Route>,
 }
 
@@ -301,7 +301,7 @@ impl DnsHandler {
         let backend = self
             .route
             .get_backend(query.original().name())
-            .unwrap_or(self.default_backend.as_ref());
+            .unwrap_or_else(|| self.default_backend.as_ref());
 
         let src_addr = request.src();
         let message = self.extract_message(request);

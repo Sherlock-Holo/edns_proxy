@@ -3,11 +3,12 @@ pub mod dnsmasq;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::io::{BufRead, BufReader, Read};
+use std::sync::Arc;
 
 use hickory_proto::rr::Name;
 use tracing::{error, instrument, warn};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, DynBackend};
 
 #[derive(Default)]
 pub struct Route {
@@ -22,7 +23,7 @@ impl Debug for Route {
 
 struct Node {
     name: String,
-    backend: Option<Box<dyn Backend + Send + Sync>>,
+    backend: Option<DynBackend>,
     children: BTreeMap<String, Node>,
 }
 
@@ -46,11 +47,7 @@ impl Node {
 }
 
 impl Route {
-    pub fn import<R: Read, B: Backend + Send + Sync + Clone + 'static>(
-        &mut self,
-        reader: R,
-        backend: B,
-    ) -> anyhow::Result<()> {
+    pub fn import<R: Read>(&mut self, reader: R, backend: DynBackend) -> anyhow::Result<()> {
         let lines = BufReader::new(reader).lines();
 
         for line in lines {
@@ -63,24 +60,24 @@ impl Route {
                 continue;
             }
 
-            self.insert(line.to_string(), backend.clone());
+            self.insert(line.to_string(), Arc::clone(&backend));
         }
 
         Ok(())
     }
 
-    pub fn insert<B: Backend + Send + Sync + 'static>(&mut self, domain: String, backend: B) {
+    pub fn insert(&mut self, domain: String, backend: DynBackend) {
         let names = domain.split('.').rev().filter(|s| !s.is_empty());
         let children = &mut self.nodes;
 
         assert!(Self::insert_inner(names, children, backend).is_none());
     }
 
-    fn insert_inner<'a, I: Iterator<Item = &'a str>, B: Backend + Send + Sync + 'static>(
+    fn insert_inner<'a, I: Iterator<Item = &'a str>>(
         mut names: I,
         children: &mut BTreeMap<String, Node>,
-        backend: B,
-    ) -> Option<B> {
+        backend: DynBackend,
+    ) -> Option<DynBackend> {
         match names.next() {
             None => Some(backend),
 
@@ -93,7 +90,7 @@ impl Route {
                     match Self::insert_inner(names, &mut child.children, backend) {
                         None => None,
                         Some(backend) => {
-                            child.backend = Some(Box::new(backend));
+                            child.backend = Some(backend);
 
                             None
                         }
@@ -104,7 +101,7 @@ impl Route {
                     let children = &mut child.children;
 
                     if let Some(backend) = Self::insert_inner(names, children, backend) {
-                        child.backend = Some(Box::new(backend));
+                        child.backend = Some(backend);
                     }
 
                     None
@@ -163,13 +160,13 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use hickory_proto::op::Message;
     use hickory_proto::xfer::DnsResponse;
 
     use super::*;
-    use crate::backend::DynBackend;
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     pub struct TestBackend(pub usize);
@@ -179,24 +176,20 @@ mod tests {
         async fn send_request(&self, _: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
             panic!("just for test")
         }
-
-        fn to_dyn_clone(&self) -> DynBackend {
-            Box::new(*self)
-        }
     }
 
     #[test]
     fn insert() {
         let mut route = Route::default();
 
-        route.insert("www.example.com".to_string(), TestBackend(1));
+        route.insert("www.example.com".to_string(), Arc::new(TestBackend(1)));
     }
 
     #[test]
     fn get() {
         let mut route = Route::default();
 
-        route.insert("example.com".to_string(), TestBackend(1));
+        route.insert("example.com".to_string(), Arc::new(TestBackend(1)));
 
         assert!(route.get_backend(&"example.com".parse().unwrap()).is_some());
         assert!(
@@ -215,7 +208,7 @@ mod tests {
     fn get_not_found() {
         let mut route = Route::default();
 
-        route.insert("example.io".to_string(), TestBackend(1));
+        route.insert("example.io".to_string(), Arc::new(TestBackend(1)));
 
         assert!(route.get_backend(&"example.com".parse().unwrap()).is_none());
         assert!(route.get_backend(&"io".parse().unwrap()).is_none());
@@ -225,8 +218,8 @@ mod tests {
     fn multi() {
         let mut route = Route::default();
 
-        route.insert("example.com".to_string(), TestBackend(1));
-        route.insert("github.com".to_string(), TestBackend(2));
+        route.insert("example.com".to_string(), Arc::new(TestBackend(1)));
+        route.insert("github.com".to_string(), Arc::new(TestBackend(2)));
 
         assert!(route.get_backend(&"example.com".parse().unwrap()).is_some());
         assert!(

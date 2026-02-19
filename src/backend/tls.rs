@@ -1,35 +1,32 @@
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use deadpool::Runtime;
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
-use futures_util::{Stream, TryStreamExt};
+use futures_util::TryStreamExt;
+use hickory_proto::op::Message;
 use hickory_proto::runtime::TokioRuntimeProvider;
 use hickory_proto::runtime::iocompat::AsyncIoTokioAsStd;
 use hickory_proto::rustls::tls_stream::TokioTlsClientStream;
 use hickory_proto::rustls::{TlsStream, tls_connect};
-use hickory_proto::xfer::{
-    DnsRequest, DnsRequestSender, DnsResponse, DnsResponseStream, SerialMessage,
-};
+use hickory_proto::xfer::{DnsResponse, SerialMessage};
 use hickory_proto::{BufDnsStreamHandle, DnsStreamHandle, ProtoError};
 use rand::{prelude::*, rng};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
+use tracing::instrument;
 
-use crate::backend::adaptor_backend::{DnsRequestSenderBuild, DynDnsRequestSender};
+use crate::backend::Backend;
 
-#[derive(Debug, Clone)]
-pub struct TlsBuilder {
+#[derive(Debug)]
+pub struct TlsBackend {
     pool: Pool<TlsStreamManager>,
 }
 
-impl TlsBuilder {
+impl TlsBackend {
     pub fn new(addrs: HashSet<SocketAddr>, name: String) -> anyhow::Result<Self> {
         let mut root_cert_store = RootCertStore::empty();
         let certs = rustls_native_certs::load_native_certs();
@@ -56,6 +53,31 @@ impl TlsBuilder {
             .runtime(Runtime::Tokio1)
             .build()?,
         })
+    }
+
+    #[instrument(skip(self), ret, err)]
+    async fn do_send(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
+        let mut tls_stream = self.pool.get().await?;
+        let serial_message = SerialMessage::new(message.to_vec()?, src);
+
+        let result = async {
+            tls_stream.sender.send(serial_message)?;
+            let resp = tls_stream
+                .tls_stream
+                .try_next()
+                .await?
+                .ok_or_else(|| ProtoError::from("TLS stream EOF unexpected"))?;
+
+            let buffer = resp.into_parts().0;
+
+            DnsResponse::from_buffer(buffer)
+        }
+        .await
+        .inspect_err(|_| {
+            let _ = Object::<_>::take(tls_stream);
+        });
+
+        result.map_err(Into::into)
     }
 }
 
@@ -106,64 +128,16 @@ impl Debug for TlsStreamWrapper {
     }
 }
 
-#[derive(Clone)]
-struct TlsStreamDnsRequestSender {
-    pool: Pool<TlsStreamManager>,
-}
-
-impl Stream for TlsStreamDnsRequestSender {
-    type Item = Result<(), ProtoError>;
-
-    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(Some(Ok(())))
-    }
-}
-
-impl DnsRequestSender for TlsStreamDnsRequestSender {
-    fn send_message(&mut self, request: DnsRequest) -> DnsResponseStream {
-        let pool = self.pool.clone();
-
-        Box::pin(async move {
-            let mut tls_stream = pool.get().await.map_err(io::Error::other)?;
-            let peer_addr = tls_stream.tls_stream.peer_addr();
-            let (message, _) = request.into_parts();
-            let serial_message = SerialMessage::new(message.to_vec()?, peer_addr);
-
-            async {
-                tls_stream.sender.send(serial_message)?;
-                let resp = tls_stream
-                    .tls_stream
-                    .try_next()
-                    .await?
-                    .ok_or_else(|| ProtoError::from("TLS stream EOF unexpected"))?;
-
-                let buffer = resp.into_parts().0;
-
-                DnsResponse::from_buffer(buffer)
-            }
-            .await
-            .inspect_err(|_| {
-                let _ = Object::<_>::take(tls_stream);
-            })
-        })
-        .into()
-    }
-
-    fn shutdown(&mut self) {}
-
-    fn is_shutdown(&self) -> bool {
-        false
-    }
-}
-
 #[async_trait]
-impl DnsRequestSenderBuild for TlsBuilder {
-    async fn build(&self) -> anyhow::Result<DynDnsRequestSender> {
-        Ok(DynDnsRequestSender::new_with_clone(
-            TlsStreamDnsRequestSender {
-                pool: self.pool.clone(),
-            },
-        ))
+impl Backend for TlsBackend {
+    #[instrument(skip(self), ret, err)]
+    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
+        let res = self.do_send(message.clone(), src).await;
+        if res.is_ok() {
+            return res;
+        }
+
+        self.do_send(message, src).await
     }
 }
 
@@ -173,22 +147,18 @@ mod tests {
 
     use super::super::tests::*;
     use super::*;
-    use crate::backend::Backend;
-    use crate::backend::adaptor_backend::AdaptorBackend;
 
     #[tokio::test]
     async fn test() {
         init_tls_provider();
 
-        let https_builder = TlsBuilder::new(
+        let backend = TlsBackend::new(
             ["1.12.12.21:853".parse().unwrap()].into(),
             "dot.pub".to_string(),
         )
         .unwrap();
 
-        let generic_backend = AdaptorBackend::new(https_builder, 3).await.unwrap();
-
-        let dns_response = generic_backend
+        let dns_response = backend
             .send_request(
                 create_query_message(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),

@@ -2,7 +2,7 @@ use tower::Layer;
 use tower::layer::layer_fn;
 use tower::layer::util::Identity;
 
-use crate::backend::{Backend, DynBackend};
+use crate::backend::DynBackend;
 
 pub struct LayerBuilder {
     layer: Box<dyn Layer<DynBackend, Service = DynBackend>>,
@@ -28,9 +28,7 @@ impl LayerBuilder {
         }
     }
 
-    pub fn build<B: Backend + Send + Sync + 'static>(self, backend: B) -> DynBackend {
-        let service = self.layer.layer(Box::new(backend));
-
-        Box::new(service)
+    pub fn build(self, backend: DynBackend) -> DynBackend {
+        self.layer.layer(backend)
     }
 }

@@ -44,8 +44,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::addr::BindAddr;
 use crate::backend::{
-    AdaptorBackend, Backend, DynBackend, Group, H3Builder, HttpsBuilder, QuicBuilder,
-    StaticFileBuilder, TlsBuilder, UdpBuilder,
+    DynBackend, Group, H3Backend, HttpsBackend, QuicBackend, StaticFileBackend, TlsBackend,
+    UdpBackend,
 };
 use crate::cache::Cache;
 use crate::config::{
@@ -169,7 +169,6 @@ async fn collect_backends(
     let mut backend_groups = HashMap::new();
     let mut backends = HashMap::with_capacity(cfg_backends.len());
     for backend in cfg_backends {
-        let attempts = backend.attempts();
         let name = backend.name;
         if backends.contains_key(&name) {
             return Err(anyhow::anyhow!("backend '{}' already exists", name));
@@ -188,22 +187,13 @@ async fn collect_backends(
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
 
-                let tls_backend =
-                    AdaptorBackend::new(TlsBuilder::new(addrs, tls_name)?, attempts).await?;
-
-                Box::new(tls_backend)
+                Arc::new(TlsBackend::new(addrs, tls_name)?)
             }
 
-            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Box::new(
-                AdaptorBackend::new(
-                    UdpBuilder::new(
-                        addr.into_iter().collect(),
-                        timeout.map(|timeout| timeout.into_inner()),
-                    ),
-                    attempts,
-                )
-                .await?,
-            ),
+            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Arc::new(UdpBackend::new(
+                addr.into_iter().collect(),
+                timeout.map(|timeout| timeout.into_inner()),
+            )),
 
             BackendDetail::Https(config::HttpsBasedBackend {
                 host,
@@ -218,10 +208,7 @@ async fn collect_backends(
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
 
-                let https_backend =
-                    AdaptorBackend::new(HttpsBuilder::new(addrs, host, path)?, attempts).await?;
-
-                Box::new(https_backend)
+                Arc::new(HttpsBackend::new(addrs, host, path)?)
             }
 
             BackendDetail::Quic(config::TlsBackend {
@@ -235,10 +222,7 @@ async fn collect_backends(
                     }
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
-                let quic_backend =
-                    AdaptorBackend::new(QuicBuilder::new(addrs, tls_name)?, attempts).await?;
-
-                Box::new(quic_backend)
+                Arc::new(QuicBackend::new(addrs, tls_name)?)
             }
 
             BackendDetail::H3(config::HttpsBasedBackend {
@@ -253,21 +237,12 @@ async fn collect_backends(
                     }
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
-                let h3_backend =
-                    AdaptorBackend::new(H3Builder::new(addrs, host, path)?, attempts).await?;
-
-                Box::new(h3_backend)
+                Arc::new(H3Backend::new(addrs, host, path)?)
             }
 
             BackendDetail::StaticFile(static_config) => {
                 let static_file_backend_config = static_config.load()?;
-                let static_backend = AdaptorBackend::new(
-                    StaticFileBuilder::new(static_file_backend_config)?,
-                    attempts,
-                )
-                .await?;
-
-                Box::new(static_backend)
+                Arc::new(StaticFileBackend::new(static_file_backend_config)?)
             }
 
             BackendDetail::Group(backend_info_list) => {
@@ -295,7 +270,7 @@ async fn collect_backends(
 
         let group = Group::new(grouped_backends);
 
-        backends.insert(name, Box::new(group));
+        backends.insert(name, Arc::new(group));
     }
 
     Ok(backends)
@@ -392,10 +367,7 @@ fn spawn_proxy_workers(
     Ok((join_handles, shutdown_notify, threads))
 }
 
-fn filter_backend<B: Backend + Send + Sync + 'static>(
-    filter: Vec<Filter>,
-    backend: B,
-) -> DynBackend {
+fn filter_backend(filter: Vec<Filter>, backend: DynBackend) -> DynBackend {
     let mut layer_builder = LayerBuilder::new();
     for filter in filter {
         match filter {
@@ -406,7 +378,7 @@ fn filter_backend<B: Backend + Send + Sync + 'static>(
                 let layer = EcsFilterLayer::new(ipv4_prefix, ipv6_prefix);
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Box::new(layer.layer(backend)) as DynBackend
+                    Arc::new(layer.layer(backend)) as DynBackend
                 }));
             }
 
@@ -417,7 +389,7 @@ fn filter_backend<B: Backend + Send + Sync + 'static>(
                 );
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Box::new(layer.layer(backend)) as DynBackend
+                    Arc::new(layer.layer(backend)) as DynBackend
                 }));
             }
         }

@@ -6,7 +6,7 @@ use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
 use hickory_proto::xfer::DnsResponse;
 use tower::Layer;
 
-use crate::backend::{Backend, DynBackend};
+use crate::backend::Backend;
 
 #[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct EcsFilterLayer {
@@ -43,7 +43,7 @@ impl<B> Layer<B> for EcsFilterLayer {
 }
 
 #[async_trait]
-impl<B: Backend + Sync + Clone + Send + 'static> Backend for EcsFilter<B> {
+impl<B: Backend + Sync + Send + 'static> Backend for EcsFilter<B> {
     async fn send_request(
         &self,
         mut message: Message,
@@ -64,9 +64,5 @@ impl<B: Backend + Sync + Clone + Send + 'static> Backend for EcsFilter<B> {
         }
 
         self.backend.send_request(message, src).await
-    }
-
-    fn to_dyn_clone(&self) -> DynBackend {
-        Box::new(self.clone())
     }
 }
