@@ -1,29 +1,21 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufReader, IsTerminal};
+use std::io::BufReader;
 use std::iter::repeat_n;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::thread;
-use std::{env, io};
 
 use async_notify::Notify;
+use clap::Parser;
 use clap::builder::styling;
-use clap::{Parser, ValueEnum};
 use futures_util::{FutureExt, select};
 use hickory_proto::xfer::Protocol;
 use hickory_resolver::Resolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::name_server::TokioConnectionProvider;
 use itertools::Itertools;
-use opentelemetry::KeyValue;
-use opentelemetry::global;
-use opentelemetry::trace::TracerProvider;
-use opentelemetry_otlp::tonic_types::transport::ClientTlsConfig;
-use opentelemetry_otlp::{SpanExporter, WithExportConfig, WithTonicConfig};
-use opentelemetry_sdk::resource::Resource;
-use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::runtime::Builder;
@@ -31,16 +23,8 @@ use tokio::signal::unix;
 use tokio::signal::unix::SignalKind;
 use tower::Layer;
 use tower::layer::layer_fn;
-use tracing::level_filters::LevelFilter;
-use tracing::{Level, error, instrument};
-use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
-use tracing_log::LogTracer;
-use tracing_subscriber::Registry;
-use tracing_subscriber::filter::Targets;
-use tracing_subscriber::fmt::MakeWriter;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+use tracing::error;
+use tracing::instrument;
 
 use crate::addr::BindAddr;
 use crate::backend::{
@@ -55,6 +39,7 @@ use crate::config::{
 use crate::filter::ecs::EcsFilterLayer;
 use crate::filter::static_ecs::StaticEcsFilterLayer;
 use crate::layer::LayerBuilder;
+use crate::log::{LogLevel, init_log};
 use crate::proxy::{
     BindSocket, SocketType, create_tcp_listener_reuse_port, create_udp_socket_reuse_port,
     socket_type_for_bind, start_proxy_with_socket,
@@ -67,6 +52,7 @@ mod cache;
 mod config;
 mod filter;
 mod layer;
+mod log;
 mod proxy;
 mod route;
 mod utils;
@@ -107,40 +93,6 @@ pub struct Args {
     #[clap(long, env, default_value = "0.01")]
     /// OpenTelemetry trace sampling rate (0.0-1.0, e.g. 0.01 for 1%)
     otel_sampling_rate: f64,
-}
-
-#[derive(Debug, ValueEnum, Eq, PartialEq, Copy, Clone, Default)]
-enum LogLevel {
-    Off,
-    Debug,
-    #[default]
-    Info,
-    Warn,
-    Error,
-}
-
-impl From<LogLevel> for LevelFilter {
-    fn from(value: LogLevel) -> Self {
-        match value {
-            LogLevel::Off => LevelFilter::OFF,
-            LogLevel::Debug => LevelFilter::DEBUG,
-            LogLevel::Info => LevelFilter::INFO,
-            LogLevel::Warn => LevelFilter::WARN,
-            LogLevel::Error => LevelFilter::ERROR,
-        }
-    }
-}
-
-impl From<LogLevel> for Level {
-    fn from(value: LogLevel) -> Self {
-        match value {
-            LogLevel::Off => Level::ERROR,
-            LogLevel::Debug => Level::DEBUG,
-            LogLevel::Info => Level::INFO,
-            LogLevel::Warn => Level::WARN,
-            LogLevel::Error => Level::ERROR,
-        }
-    }
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -547,131 +499,6 @@ async fn signal_stop() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-struct LogShutdownGuard {
-    _non_blocking_writer_guard: WorkerGuard,
-}
-
-impl Drop for LogShutdownGuard {
-    fn drop(&mut self) {}
-}
-
-fn init_log(
-    level: LogLevel,
-    otel_endpoint: Option<String>,
-    otel_token: Option<String>,
-    otel_sampling_rate: f64,
-) -> anyhow::Result<LogShutdownGuard> {
-    let (writer, guard) = NonBlockingBuilder::default()
-        .lossy(false)
-        .buffered_lines_limit(512_000)
-        .finish(io::stderr());
-
-    let writer = writer.with_max_level(level.into());
-    let otel_layer = match (otel_endpoint, otel_token) {
-        (Some(endpoint), Some(token)) => {
-            Some(make_otel_layer(endpoint, token, otel_sampling_rate)?)
-        }
-        _ => None,
-    };
-
-    if io::stderr().is_terminal() {
-        init_console_log(writer, otel_layer);
-    } else {
-        init_json_log(writer, otel_layer);
-    }
-
-    let _ = LogTracer::init();
-
-    Ok(LogShutdownGuard {
-        _non_blocking_writer_guard: guard,
-    })
-}
-
-fn init_console_log<L, W>(writer: W, otel_layer: L)
-where
-    L: tracing_subscriber::layer::Layer<Registry> + Send + Sync + 'static,
-    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
-{
-    let layer = tracing_subscriber::fmt::layer()
-        .pretty()
-        .with_line_number(true)
-        .with_writer(writer)
-        .with_target(true);
-
-    let targets = Targets::new().with_default(LevelFilter::TRACE);
-
-    Registry::default()
-        .with(otel_layer)
-        .with(targets)
-        .with(layer)
-        .init();
-}
-
-fn init_json_log<L, W>(writer: W, otel_layer: L)
-where
-    L: tracing_subscriber::layer::Layer<Registry> + Send + Sync + 'static,
-    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
-{
-    let json = json_subscriber::layer()
-        .with_writer(writer)
-        .with_current_span(false)
-        .with_span_list(false)
-        .with_line_number(true)
-        .with_file(true)
-        .with_target(true)
-        .with_opentelemetry_ids(true);
-
-    let targets = Targets::new().with_default(LevelFilter::TRACE);
-
-    Registry::default()
-        .with(otel_layer)
-        .with(targets)
-        .with(json)
-        .init();
-}
-
-fn make_otel_layer(
-    otel_endpoint: String,
-    otel_token: String,
-    sampling_rate: f64,
-) -> anyhow::Result<impl tracing_subscriber::layer::Layer<Registry>> {
-    let use_tls = otel_endpoint.starts_with("https://");
-
-    let mut exporter_builder = SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(otel_endpoint);
-
-    if use_tls {
-        exporter_builder =
-            exporter_builder.with_tls_config(ClientTlsConfig::new().with_enabled_roots());
-    }
-
-    let exporter = exporter_builder.build()?;
-
-    let host_name = env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
-    let resource = Resource::builder()
-        .with_attributes([
-            KeyValue::new("token", otel_token),
-            KeyValue::new("service.name", "edns_proxy"),
-            KeyValue::new("host.name", host_name),
-        ])
-        .build();
-
-    let sampler = Sampler::TraceIdRatioBased(sampling_rate.clamp(0.0, 1.0));
-    let tracer_provider = SdkTracerProvider::builder()
-        .with_sampler(sampler)
-        .with_batch_exporter(exporter)
-        .with_resource(resource)
-        .build();
-
-    let tracer = tracer_provider.tracer("edns_proxy");
-    global::set_tracer_provider(tracer_provider);
-
-    Ok(tracing_opentelemetry::layer()
-        .with_level(true)
-        .with_tracer(tracer))
 }
 
 fn init_tls_provider() {

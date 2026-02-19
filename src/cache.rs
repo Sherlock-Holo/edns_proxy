@@ -66,21 +66,20 @@ impl Cache {
     #[instrument(ret)]
     fn get_response(&self, query: Query, src_ip: IpInet) -> Option<DnsResponse> {
         let key = RequestKey { query, src_ip };
-        let resp = self.inner.get(&key)?;
-        let elapsed = resp.cache_time.elapsed().as_secs() as u32;
-        let ttl = resp.ttl;
+        let mut cache_resp = self.inner.get(&key)?;
+        let elapsed = cache_resp.cache_time.elapsed().as_secs() as u32;
+        let ttl = cache_resp.ttl;
 
         if elapsed >= ttl {
             self.inner.remove(&key);
 
             None
         } else {
-            let mut resp = resp.response.clone();
-            for answer in resp.answers_mut() {
+            for answer in cache_resp.response.answers_mut() {
                 answer.set_ttl(ttl - elapsed);
             }
 
-            Some(resp)
+            Some(cache_resp.response)
         }
     }
 
