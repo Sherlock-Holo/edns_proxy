@@ -18,7 +18,6 @@ use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::FmtContext;
 use tracing_subscriber::fmt::format::{Compact, Format, FormatEvent, FormatFields, Pretty, Writer};
 use tracing_subscriber::fmt::time::SystemTime;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -141,7 +140,6 @@ pub fn init_log(
         .buffered_lines_limit(512_000)
         .finish(io::stderr());
 
-    let writer = writer.with_max_level(level.into());
     let otel_layer = match (otel_endpoint, otel_token) {
         (Some(endpoint), Some(token)) => {
             Some(make_otel_layer(endpoint, token, otel_sampling_rate)?)
@@ -149,7 +147,7 @@ pub fn init_log(
         _ => None,
     };
 
-    let format_layer: PrettyOrCompact = if io::stderr().is_terminal() {
+    let formatter: PrettyOrCompact = if io::stderr().is_terminal() {
         PrettyOrCompact::Pretty(
             tracing_subscriber::fmt::format()
                 .pretty()
@@ -165,16 +163,17 @@ pub fn init_log(
         )
     };
 
-    let layer = tracing_subscriber::fmt::layer()
-        .event_format(OtelTraceIdFormat::new(format_layer))
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .event_format(OtelTraceIdFormat::new(formatter))
         .with_writer(writer);
 
     let targets = Targets::new().with_default(LevelFilter::TRACE);
 
     Registry::default()
         .with(otel_layer)
+        .with(LevelFilter::from(level))
         .with(targets)
-        .with(layer)
+        .with(fmt_layer)
         .init();
 
     let _ = LogTracer::init();
