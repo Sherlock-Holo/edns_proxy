@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, IsTerminal};
+use std::iter::repeat_n;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -353,12 +354,11 @@ fn spawn_proxy_workers(
         let cache_config = proxy
             .cache
             .map(|c| (c.capacity, c.ipv4_fuzz_prefix, c.ipv6_fuzz_prefix));
-        let backend_clones: Vec<_> = (0..n).map(|_| default_backend.clone()).collect();
 
-        for backend in backend_clones {
-            let shutdown = Arc::clone(&shutdown_notify);
-            let route = Arc::clone(&route);
-            let bind_addr = Arc::clone(&bind_addr);
+        for backend in repeat_n(default_backend, n) {
+            let shutdown = shutdown_notify.clone();
+            let route = route.clone();
+            let bind_addr = bind_addr.clone();
 
             let handle = thread::spawn(move || {
                 let rt = Builder::new_current_thread()
