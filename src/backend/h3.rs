@@ -1,23 +1,28 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use hickory_proto::h3::H3ClientStreamBuilder;
+use hickory_proto::h3::{H3ClientStream, H3ClientStreamBuilder};
+use hickory_proto::op::Message;
+use hickory_proto::xfer::{
+    DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse, FirstAnswer,
+};
 use rand::prelude::*;
 use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
+use tracing::instrument;
 
-use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
+use crate::backend::Backend;
 
-#[derive(Debug, Clone)]
-pub struct H3Builder {
-    inner: Arc<H3BuilderInner>,
+#[derive(Debug)]
+pub struct H3Backend {
+    inner: Arc<H3BackendInner>,
 }
 
-impl H3Builder {
+impl H3Backend {
     pub fn new(
         addrs: HashSet<SocketAddr>,
         host: String,
@@ -43,19 +48,17 @@ impl H3Builder {
         builder.crypto_config(client_config);
 
         Ok(Self {
-            inner: Arc::new(H3BuilderInner {
+            inner: Arc::new(H3BackendInner {
                 addrs,
                 host,
                 query_path,
                 builder,
+                stream_cache: RwLock::new(None),
             }),
         })
     }
-}
 
-#[async_trait]
-impl DnsRequestSenderBuild for H3Builder {
-    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
+    async fn build_stream(&self) -> anyhow::Result<H3ClientStream> {
         let addr = self
             .inner
             .addrs
@@ -64,32 +67,62 @@ impl DnsRequestSenderBuild for H3Builder {
             .choose(&mut rng())
             .expect("addrs must not empty");
 
-        let mut h3_client_stream = self
-            .inner
+        self.inner
             .builder
             .clone()
             .build(addr, self.inner.host.clone(), self.inner.query_path.clone())
-            .await?;
+            .await
+            .map_err(Into::into)
+    }
 
-        h3_client_stream
+    async fn do_send_with_stream(
+        stream: &mut H3ClientStream,
+        message: Message,
+    ) -> anyhow::Result<DnsResponse> {
+        stream
             .try_next()
             .await?
             .ok_or_else(|| anyhow::anyhow!("h3 stream connected but closed immediately"))?;
 
-        Ok(BoxDnsRequestSender::new(h3_client_stream))
+        let mut options = DnsRequestOptions::default();
+        options.use_edns = true;
+        let request = DnsRequest::new(message, options);
+        let dns_response = stream.send_message(request).first_answer().await?;
+
+        Ok(dns_response)
+    }
+
+    #[instrument(skip(self), ret, err)]
+    async fn do_send(&self, message: Message) -> anyhow::Result<DnsResponse> {
+        let stream = self.inner.stream_cache.read().unwrap().clone();
+
+        if let Some(mut s) = stream {
+            match Self::do_send_with_stream(&mut s, message.clone()).await {
+                Ok(r) => return Ok(r),
+                Err(_) => {
+                    *self.inner.stream_cache.write().unwrap() = None;
+                }
+            }
+        }
+
+        let mut new_stream = self.build_stream().await?;
+        *self.inner.stream_cache.write().unwrap() = Some(new_stream.clone());
+
+        Self::do_send_with_stream(&mut new_stream, message).await
     }
 }
 
-struct H3BuilderInner {
+struct H3BackendInner {
     addrs: HashSet<SocketAddr>,
     host: String,
     query_path: String,
     builder: H3ClientStreamBuilder,
+    stream_cache: RwLock<Option<H3ClientStream>>,
 }
 
-impl Debug for H3BuilderInner {
+impl Debug for H3BackendInner {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("H3BuilderInner")
+        f.debug_struct("H3BackendInner")
             .field("addrs", &self.addrs)
             .field("host", &self.host)
             .field("query_path", &self.query_path)
@@ -97,26 +130,42 @@ impl Debug for H3BuilderInner {
     }
 }
 
+#[async_trait]
+impl Backend for H3Backend {
+    #[instrument(skip(self), ret, err)]
+    async fn send_request(
+        &self,
+        message: Message,
+        _src: SocketAddr,
+    ) -> anyhow::Result<DnsResponse> {
+        let res = self.do_send(message.clone()).await;
+        if res.is_ok() {
+            return res;
+        }
+
+        self.do_send(message).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
+    use super::super::tests::*;
     use super::*;
-    use crate::backend::tests::{check_dns_response, create_query_message};
-    use crate::backend::{AdaptorBackend, Backend};
 
     #[tokio::test]
     async fn test() {
-        let https_builder = H3Builder::new(
+        init_tls_provider();
+
+        let backend = H3Backend::new(
             ["45.90.28.1:443".parse().unwrap()].into(),
             "dns.nextdns.io".to_string(),
             "/dns-query".to_string(),
         )
         .unwrap();
 
-        let generic_backend = AdaptorBackend::new(https_builder, 3).await.unwrap();
-
-        let dns_response = generic_backend
+        let dns_response = backend
             .send_request(
                 create_query_message(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),

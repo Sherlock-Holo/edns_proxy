@@ -3,10 +3,12 @@ pub mod dnsmasq;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::io::{BufRead, BufReader, Read};
+use std::sync::Arc;
 
-use tracing::{instrument, warn};
+use hickory_proto::rr::Name;
+use tracing::{error, instrument, warn};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, DynBackend};
 
 #[derive(Default)]
 pub struct Route {
@@ -21,7 +23,7 @@ impl Debug for Route {
 
 struct Node {
     name: String,
-    backend: Option<Box<dyn Backend + Send + Sync>>,
+    backend: Option<DynBackend>,
     children: BTreeMap<String, Node>,
 }
 
@@ -45,11 +47,7 @@ impl Node {
 }
 
 impl Route {
-    pub fn import<R: Read, B: Backend + Send + Sync + Clone + 'static>(
-        &mut self,
-        reader: R,
-        backend: B,
-    ) -> anyhow::Result<()> {
+    pub fn import<R: Read>(&mut self, reader: R, backend: DynBackend) -> anyhow::Result<()> {
         let lines = BufReader::new(reader).lines();
 
         for line in lines {
@@ -62,24 +60,24 @@ impl Route {
                 continue;
             }
 
-            self.insert(line.to_string(), backend.clone());
+            self.insert(line.to_string(), Arc::clone(&backend));
         }
 
         Ok(())
     }
 
-    pub fn insert<B: Backend + Send + Sync + 'static>(&mut self, domain: String, backend: B) {
+    pub fn insert(&mut self, domain: String, backend: DynBackend) {
         let names = domain.split('.').rev().filter(|s| !s.is_empty());
         let children = &mut self.nodes;
 
         assert!(Self::insert_inner(names, children, backend).is_none());
     }
 
-    fn insert_inner<'a, I: Iterator<Item = &'a str>, B: Backend + Send + Sync + 'static>(
+    fn insert_inner<'a, I: Iterator<Item = &'a str>>(
         mut names: I,
         children: &mut BTreeMap<String, Node>,
-        backend: B,
-    ) -> Option<B> {
+        backend: DynBackend,
+    ) -> Option<DynBackend> {
         match names.next() {
             None => Some(backend),
 
@@ -92,7 +90,7 @@ impl Route {
                     match Self::insert_inner(names, &mut child.children, backend) {
                         None => None,
                         Some(backend) => {
-                            child.backend = Some(Box::new(backend));
+                            child.backend = Some(backend);
 
                             None
                         }
@@ -103,7 +101,7 @@ impl Route {
                     let children = &mut child.children;
 
                     if let Some(backend) = Self::insert_inner(names, children, backend) {
-                        child.backend = Some(Box::new(backend));
+                        child.backend = Some(backend);
                     }
 
                     None
@@ -112,21 +110,40 @@ impl Route {
         }
     }
 
-    #[instrument(ret)]
-    pub fn get_backend(&self, domain: &str) -> Option<&(dyn Backend + Send + Sync)> {
-        let mut names = domain.split('.').rev().filter(|s| !s.is_empty());
+    #[instrument(skip(self), ret)]
+    pub fn get_backend(&self, name: &Name) -> Option<&(dyn Backend + Send + Sync)> {
+        let mut names = name.iter().rev().filter(|s| !s.is_empty());
         let root = match names.next() {
             None => {
-                warn!(domain, "split domain first name should always exist");
+                warn!("split domain first name should always exist");
 
                 return None;
             }
 
-            Some(root) => root,
+            Some(root) => match str::from_utf8(root) {
+                Err(err) => {
+                    error!(%err, "invalid domain root");
+
+                    return None;
+                }
+
+                Ok(root) => root,
+            },
         };
+
         let mut node = self.nodes.get(root)?;
 
         for name in names {
+            let name = match str::from_utf8(name) {
+                Err(err) => {
+                    error!(%err, "invalid domain name");
+
+                    return None;
+                }
+
+                Ok(name) => name,
+            };
+
             match node.children.get(name) {
                 Some(child) => {
                     node = child;
@@ -143,13 +160,13 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use hickory_proto::op::Message;
     use hickory_proto::xfer::DnsResponse;
 
     use super::*;
-    use crate::backend::DynBackend;
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     pub struct TestBackend(pub usize);
@@ -159,52 +176,72 @@ mod tests {
         async fn send_request(&self, _: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
             panic!("just for test")
         }
-
-        fn to_dyn_clone(&self) -> DynBackend {
-            Box::new(*self)
-        }
     }
 
     #[test]
     fn insert() {
         let mut route = Route::default();
 
-        route.insert("www.example.com".to_string(), TestBackend(1));
+        route.insert("www.example.com".to_string(), Arc::new(TestBackend(1)));
     }
 
     #[test]
     fn get() {
         let mut route = Route::default();
 
-        route.insert("example.com".to_string(), TestBackend(1));
+        route.insert("example.com".to_string(), Arc::new(TestBackend(1)));
 
-        assert!(route.get_backend("example.com").is_some());
-        assert!(route.get_backend("www.example.com").is_some());
-        assert!(route.get_backend("www.test.example.com").is_some());
+        assert!(route.get_backend(&"example.com".parse().unwrap()).is_some());
+        assert!(
+            route
+                .get_backend(&"www.example.com".parse().unwrap())
+                .is_some()
+        );
+        assert!(
+            route
+                .get_backend(&"www.test.example.com".parse().unwrap())
+                .is_some()
+        );
     }
 
     #[test]
     fn get_not_found() {
         let mut route = Route::default();
 
-        route.insert("example.io".to_string(), TestBackend(1));
+        route.insert("example.io".to_string(), Arc::new(TestBackend(1)));
 
-        assert!(route.get_backend("example.com").is_none());
-        assert!(route.get_backend("io").is_none());
+        assert!(route.get_backend(&"example.com".parse().unwrap()).is_none());
+        assert!(route.get_backend(&"io".parse().unwrap()).is_none());
     }
 
     #[test]
     fn multi() {
         let mut route = Route::default();
 
-        route.insert("example.com".to_string(), TestBackend(1));
-        route.insert("github.com".to_string(), TestBackend(2));
+        route.insert("example.com".to_string(), Arc::new(TestBackend(1)));
+        route.insert("github.com".to_string(), Arc::new(TestBackend(2)));
 
-        assert!(route.get_backend("example.com").is_some());
-        assert!(route.get_backend("www.example.com").is_some());
-        assert!(route.get_backend("www.test.example.com").is_some());
-        assert!(route.get_backend("github.com").is_some());
-        assert!(route.get_backend("www.github.com").is_some());
-        assert!(route.get_backend("www.test.github.com").is_some());
+        assert!(route.get_backend(&"example.com".parse().unwrap()).is_some());
+        assert!(
+            route
+                .get_backend(&"www.example.com".parse().unwrap())
+                .is_some()
+        );
+        assert!(
+            route
+                .get_backend(&"www.test.example.com".parse().unwrap())
+                .is_some()
+        );
+        assert!(route.get_backend(&"github.com".parse().unwrap()).is_some());
+        assert!(
+            route
+                .get_backend(&"www.github.com".parse().unwrap())
+                .is_some()
+        );
+        assert!(
+            route
+                .get_backend(&"www.test.github.com".parse().unwrap())
+                .is_some()
+        );
     }
 }

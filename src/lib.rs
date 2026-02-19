@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io;
 use std::io::{BufReader, IsTerminal};
+use std::iter::repeat_n;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::thread;
+use std::{env, io};
 
 use async_notify::Notify;
 use clap::builder::styling;
@@ -16,8 +17,13 @@ use hickory_resolver::Resolver;
 use hickory_resolver::config::{NameServerConfig, ResolverConfig};
 use hickory_resolver::name_server::TokioConnectionProvider;
 use itertools::Itertools;
+use opentelemetry::KeyValue;
+use opentelemetry::global;
 use opentelemetry::trace::TracerProvider;
-use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_otlp::tonic_types::transport::ClientTlsConfig;
+use opentelemetry_otlp::{SpanExporter, WithExportConfig, WithTonicConfig};
+use opentelemetry_sdk::resource::Resource;
+use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::runtime::Builder;
@@ -26,18 +32,20 @@ use tokio::signal::unix::SignalKind;
 use tower::Layer;
 use tower::layer::layer_fn;
 use tracing::level_filters::LevelFilter;
-use tracing::{error, instrument};
-use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
+use tracing::{Level, error, instrument};
+use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_log::LogTracer;
 use tracing_subscriber::Registry;
 use tracing_subscriber::filter::Targets;
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::addr::BindAddr;
 use crate::backend::{
-    AdaptorBackend, Backend, DynBackend, Group, H3Builder, HttpsBuilder, QuicBuilder,
-    StaticFileBuilder, TlsBuilder, UdpBuilder,
+    DynBackend, Group, H3Backend, HttpsBackend, QuicBackend, StaticFileBackend, TlsBackend,
+    UdpBackend,
 };
 use crate::cache::Cache;
 use crate::config::{
@@ -70,16 +78,35 @@ const STYLES: styling::Styles = styling::Styles::styled()
     .literal(styling::AnsiColor::Blue.on_default().bold())
     .placeholder(styling::AnsiColor::Cyan.on_default());
 
+const DEFAULT_RETRY_ATTEMPTS: NonZeroUsize = const {
+    match NonZeroUsize::new(3) {
+        None => unreachable!(),
+        Some(v) => v,
+    }
+};
+
 #[derive(Debug, Parser)]
 #[command(styles = STYLES)]
 pub struct Args {
     #[clap(short, long, env)]
-    /// config path
+    /// Config path
     config: String,
 
     #[clap(short, long, env, default_value = "info")]
-    /// log level
+    /// Log level
     log_level: LogLevel,
+
+    #[clap(long, env)]
+    /// OpenTelemetry OTLP gRPC endpoint (e.g. http://apm.example.com:4317 for insecure, https://apm.example.com:443 for TLS)
+    otel_endpoint: Option<String>,
+
+    #[clap(long, env)]
+    /// OpenTelemetry auth token (will be sent as Bearer token if not already prefixed)
+    otel_token: Option<String>,
+
+    #[clap(long, env, default_value = "0.01")]
+    /// OpenTelemetry trace sampling rate (0.0-1.0, e.g. 0.01 for 1%)
+    otel_sampling_rate: f64,
 }
 
 #[derive(Debug, ValueEnum, Eq, PartialEq, Copy, Clone, Default)]
@@ -104,10 +131,27 @@ impl From<LogLevel> for LevelFilter {
     }
 }
 
+impl From<LogLevel> for Level {
+    fn from(value: LogLevel) -> Self {
+        match value {
+            LogLevel::Off => Level::ERROR,
+            LogLevel::Debug => Level::DEBUG,
+            LogLevel::Info => Level::INFO,
+            LogLevel::Warn => Level::WARN,
+            LogLevel::Error => Level::ERROR,
+        }
+    }
+}
+
 pub async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let _guard = init_log(args.log_level);
+    let _guard = init_log(
+        args.log_level,
+        args.otel_endpoint,
+        args.otel_token,
+        args.otel_sampling_rate,
+    )?;
     init_tls_provider();
 
     let config = Config::read(&args.config)?;
@@ -132,7 +176,6 @@ async fn collect_backends(
     let mut backend_groups = HashMap::new();
     let mut backends = HashMap::with_capacity(cfg_backends.len());
     for backend in cfg_backends {
-        let attempts = backend.attempts();
         let name = backend.name;
         if backends.contains_key(&name) {
             return Err(anyhow::anyhow!("backend '{}' already exists", name));
@@ -151,22 +194,13 @@ async fn collect_backends(
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
 
-                let tls_backend =
-                    AdaptorBackend::new(TlsBuilder::new(addrs, tls_name)?, attempts).await?;
-
-                Box::new(tls_backend)
+                Arc::new(TlsBackend::new(addrs, tls_name)?)
             }
 
-            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Box::new(
-                AdaptorBackend::new(
-                    UdpBuilder::new(
-                        addr.into_iter().collect(),
-                        timeout.map(|timeout| timeout.into_inner()),
-                    ),
-                    attempts,
-                )
-                .await?,
-            ),
+            BackendDetail::Udp(config::UdpBackend { addr, timeout }) => Arc::new(UdpBackend::new(
+                addr.into_iter().collect(),
+                timeout.map(|timeout| timeout.into_inner()),
+            )),
 
             BackendDetail::Https(config::HttpsBasedBackend {
                 host,
@@ -181,10 +215,7 @@ async fn collect_backends(
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
 
-                let https_backend =
-                    AdaptorBackend::new(HttpsBuilder::new(addrs, host, path)?, attempts).await?;
-
-                Box::new(https_backend)
+                Arc::new(HttpsBackend::new(addrs, host, path)?)
             }
 
             BackendDetail::Quic(config::TlsBackend {
@@ -198,10 +229,7 @@ async fn collect_backends(
                     }
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
-                let quic_backend =
-                    AdaptorBackend::new(QuicBuilder::new(addrs, tls_name)?, attempts).await?;
-
-                Box::new(quic_backend)
+                Arc::new(QuicBackend::new(addrs, tls_name)?)
             }
 
             BackendDetail::H3(config::HttpsBasedBackend {
@@ -216,21 +244,12 @@ async fn collect_backends(
                     }
                     BootstrapOrAddrs::Addr(addrs) => addrs,
                 };
-                let h3_backend =
-                    AdaptorBackend::new(H3Builder::new(addrs, host, path)?, attempts).await?;
-
-                Box::new(h3_backend)
+                Arc::new(H3Backend::new(addrs, host, path)?)
             }
 
             BackendDetail::StaticFile(static_config) => {
                 let static_file_backend_config = static_config.load()?;
-                let static_backend = AdaptorBackend::new(
-                    StaticFileBuilder::new(static_file_backend_config)?,
-                    attempts,
-                )
-                .await?;
-
-                Box::new(static_backend)
+                Arc::new(StaticFileBackend::new(static_file_backend_config)?)
             }
 
             BackendDetail::Group(backend_info_list) => {
@@ -258,7 +277,7 @@ async fn collect_backends(
 
         let group = Group::new(grouped_backends);
 
-        backends.insert(name, Box::new(group));
+        backends.insert(name, Arc::new(group));
     }
 
     Ok(backends)
@@ -317,12 +336,11 @@ fn spawn_proxy_workers(
         let cache_config = proxy
             .cache
             .map(|c| (c.capacity, c.ipv4_fuzz_prefix, c.ipv6_fuzz_prefix));
-        let backend_clones: Vec<_> = (0..n).map(|_| default_backend.clone()).collect();
 
-        for backend in backend_clones {
-            let shutdown = Arc::clone(&shutdown_notify);
-            let route = Arc::clone(&route);
-            let bind_addr = Arc::clone(&bind_addr);
+        for backend in repeat_n(default_backend, n) {
+            let shutdown = shutdown_notify.clone();
+            let route = route.clone();
+            let bind_addr = bind_addr.clone();
 
             let handle = thread::spawn(move || {
                 let rt = Builder::new_current_thread()
@@ -342,8 +360,15 @@ fn spawn_proxy_workers(
 
                     let cache = cache_config.map(|(cap, v4, v6)| Cache::new(cap, v4, v6));
 
-                    let task =
-                        start_proxy_with_socket(bind_addr, socket, route, backend, cache).await?;
+                    let task = start_proxy_with_socket(
+                        bind_addr,
+                        socket,
+                        route,
+                        backend,
+                        cache,
+                        proxy.retry_attempts.unwrap_or(DEFAULT_RETRY_ATTEMPTS),
+                    )
+                    .await?;
 
                     task.run_until_shutdown(shutdown).await
                 })
@@ -356,10 +381,7 @@ fn spawn_proxy_workers(
     Ok((join_handles, shutdown_notify, threads))
 }
 
-fn filter_backend<B: Backend + Send + Sync + 'static>(
-    filter: Vec<Filter>,
-    backend: B,
-) -> DynBackend {
+fn filter_backend(filter: Vec<Filter>, backend: DynBackend) -> DynBackend {
     let mut layer_builder = LayerBuilder::new();
     for filter in filter {
         match filter {
@@ -370,7 +392,7 @@ fn filter_backend<B: Backend + Send + Sync + 'static>(
                 let layer = EcsFilterLayer::new(ipv4_prefix, ipv6_prefix);
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Box::new(layer.layer(backend)) as DynBackend
+                    Arc::new(layer.layer(backend)) as DynBackend
                 }));
             }
 
@@ -381,7 +403,7 @@ fn filter_backend<B: Backend + Send + Sync + 'static>(
                 );
 
                 layer_builder = layer_builder.layer(layer_fn(move |backend| {
-                    Box::new(layer.layer(backend)) as DynBackend
+                    Arc::new(layer.layer(backend)) as DynBackend
                 }));
             }
         }
@@ -527,24 +549,51 @@ async fn signal_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_log(level: LogLevel) -> WorkerGuard {
+struct LogShutdownGuard {
+    _non_blocking_writer_guard: WorkerGuard,
+}
+
+impl Drop for LogShutdownGuard {
+    fn drop(&mut self) {}
+}
+
+fn init_log(
+    level: LogLevel,
+    otel_endpoint: Option<String>,
+    otel_token: Option<String>,
+    otel_sampling_rate: f64,
+) -> anyhow::Result<LogShutdownGuard> {
     let (writer, guard) = NonBlockingBuilder::default()
         .lossy(false)
         .buffered_lines_limit(512_000)
         .finish(io::stderr());
 
+    let writer = writer.with_max_level(level.into());
+    let otel_layer = match (otel_endpoint, otel_token) {
+        (Some(endpoint), Some(token)) => {
+            Some(make_otel_layer(endpoint, token, otel_sampling_rate)?)
+        }
+        _ => None,
+    };
+
     if io::stderr().is_terminal() {
-        init_console_log(level, writer);
+        init_console_log(writer, otel_layer);
     } else {
-        init_json_log(level, writer);
+        init_json_log(writer, otel_layer);
     }
 
     let _ = LogTracer::init();
 
-    guard
+    Ok(LogShutdownGuard {
+        _non_blocking_writer_guard: guard,
+    })
 }
 
-fn init_console_log(level: LogLevel, writer: NonBlocking) {
+fn init_console_log<L, W>(writer: W, otel_layer: L)
+where
+    L: tracing_subscriber::layer::Layer<Registry> + Send + Sync + 'static,
+    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+{
     let layer = tracing_subscriber::fmt::layer()
         .pretty()
         .with_line_number(true)
@@ -554,16 +603,17 @@ fn init_console_log(level: LogLevel, writer: NonBlocking) {
     let targets = Targets::new().with_default(LevelFilter::TRACE);
 
     Registry::default()
+        .with(otel_layer)
         .with(targets)
         .with(layer)
-        .with(LevelFilter::from(level))
         .init();
 }
 
-fn init_json_log(level: LogLevel, writer: NonBlocking) {
-    let tracer = SdkTracerProvider::builder().build().tracer("edns_proxy");
-    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-
+fn init_json_log<L, W>(writer: W, otel_layer: L)
+where
+    L: tracing_subscriber::layer::Layer<Registry> + Send + Sync + 'static,
+    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+{
     let json = json_subscriber::layer()
         .with_writer(writer)
         .with_current_span(false)
@@ -576,11 +626,52 @@ fn init_json_log(level: LogLevel, writer: NonBlocking) {
     let targets = Targets::new().with_default(LevelFilter::TRACE);
 
     Registry::default()
+        .with(otel_layer)
         .with(targets)
-        .with(telemetry)
-        .with(LevelFilter::from(level))
         .with(json)
         .init();
+}
+
+fn make_otel_layer(
+    otel_endpoint: String,
+    otel_token: String,
+    sampling_rate: f64,
+) -> anyhow::Result<impl tracing_subscriber::layer::Layer<Registry>> {
+    let use_tls = otel_endpoint.starts_with("https://");
+
+    let mut exporter_builder = SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(otel_endpoint);
+
+    if use_tls {
+        exporter_builder =
+            exporter_builder.with_tls_config(ClientTlsConfig::new().with_enabled_roots());
+    }
+
+    let exporter = exporter_builder.build()?;
+
+    let host_name = env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string());
+    let resource = Resource::builder()
+        .with_attributes([
+            KeyValue::new("token", otel_token),
+            KeyValue::new("service.name", "edns_proxy"),
+            KeyValue::new("host.name", host_name),
+        ])
+        .build();
+
+    let sampler = Sampler::TraceIdRatioBased(sampling_rate.clamp(0.0, 1.0));
+    let tracer_provider = SdkTracerProvider::builder()
+        .with_sampler(sampler)
+        .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .build();
+
+    let tracer = tracer_provider.tracer("edns_proxy");
+    global::set_tracer_provider(tracer_provider);
+
+    Ok(tracing_opentelemetry::layer()
+        .with_level(true)
+        .with_tracer(tracer))
 }
 
 fn init_tls_provider() {

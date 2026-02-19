@@ -1,24 +1,29 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use hickory_proto::h2::HttpsClientStreamBuilder;
+use hickory_proto::h2::{HttpsClientStream, HttpsClientStreamBuilder};
+use hickory_proto::op::Message;
 use hickory_proto::runtime::TokioRuntimeProvider;
+use hickory_proto::xfer::{
+    DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse, FirstAnswer,
+};
 use rand::prelude::*;
 use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
+use tracing::instrument;
 
-use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
+use crate::backend::Backend;
 
-#[derive(Debug, Clone)]
-pub struct HttpsBuilder {
-    inner: Arc<HttpsBuilderInner>,
+#[derive(Debug)]
+pub struct HttpsBackend {
+    inner: Arc<HttpsBackendInner>,
 }
 
-impl HttpsBuilder {
+impl HttpsBackend {
     pub fn new(
         addrs: HashSet<SocketAddr>,
         host: String,
@@ -41,7 +46,7 @@ impl HttpsBuilder {
             .with_no_client_auth();
 
         Ok(Self {
-            inner: Arc::new(HttpsBuilderInner {
+            inner: Arc::new(HttpsBackendInner {
                 addrs,
                 host,
                 query_path,
@@ -49,14 +54,12 @@ impl HttpsBuilder {
                     Arc::new(client_config),
                     TokioRuntimeProvider::new(),
                 ),
+                stream_cache: RwLock::new(None),
             }),
         })
     }
-}
 
-#[async_trait]
-impl DnsRequestSenderBuild for HttpsBuilder {
-    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
+    async fn build_stream(&self) -> anyhow::Result<HttpsClientStream> {
         let addr = self
             .inner
             .addrs
@@ -65,36 +68,83 @@ impl DnsRequestSenderBuild for HttpsBuilder {
             .choose(&mut rng())
             .expect("addrs must not empty");
 
-        let mut https_client_stream = self
-            .inner
+        self.inner
             .builder
             .clone()
             .build(addr, self.inner.host.clone(), self.inner.query_path.clone())
-            .await?;
+            .await
+            .map_err(Into::into)
+    }
 
-        https_client_stream
+    async fn do_send_with_stream(
+        stream: &mut HttpsClientStream,
+        message: Message,
+    ) -> anyhow::Result<DnsResponse> {
+        stream
             .try_next()
             .await?
             .ok_or_else(|| anyhow::anyhow!("https stream connected but closed immediately"))?;
 
-        Ok(BoxDnsRequestSender::new(https_client_stream))
+        let mut options = DnsRequestOptions::default();
+        options.use_edns = true;
+        let request = DnsRequest::new(message, options);
+        let dns_response = stream.send_message(request).first_answer().await?;
+
+        Ok(dns_response)
+    }
+
+    #[instrument(skip(self), ret, err)]
+    async fn do_send(&self, message: Message) -> anyhow::Result<DnsResponse> {
+        let stream = self.inner.stream_cache.read().unwrap().clone();
+
+        if let Some(mut s) = stream {
+            match Self::do_send_with_stream(&mut s, message.clone()).await {
+                Ok(r) => return Ok(r),
+                Err(_) => {
+                    *self.inner.stream_cache.write().unwrap() = None;
+                }
+            }
+        }
+
+        let mut new_stream = self.build_stream().await?;
+        *self.inner.stream_cache.write().unwrap() = Some(new_stream.clone());
+
+        Self::do_send_with_stream(&mut new_stream, message).await
     }
 }
 
-struct HttpsBuilderInner {
+struct HttpsBackendInner {
     addrs: HashSet<SocketAddr>,
     host: String,
     query_path: String,
     builder: HttpsClientStreamBuilder<TokioRuntimeProvider>,
+    stream_cache: RwLock<Option<HttpsClientStream>>,
 }
 
-impl Debug for HttpsBuilderInner {
+impl Debug for HttpsBackendInner {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpsBuilderInner")
+        f.debug_struct("HttpsBackendInner")
             .field("addrs", &self.addrs)
             .field("host", &self.host)
             .field("query_path", &self.query_path)
             .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl Backend for HttpsBackend {
+    #[instrument(skip(self), ret, err)]
+    async fn send_request(
+        &self,
+        message: Message,
+        _src: SocketAddr,
+    ) -> anyhow::Result<DnsResponse> {
+        let res = self.do_send(message.clone()).await;
+        if res.is_ok() {
+            return res;
+        }
+
+        self.do_send(message).await
     }
 }
 
@@ -104,21 +154,19 @@ mod tests {
 
     use super::super::tests::*;
     use super::*;
-    use crate::backend::Backend;
-    use crate::backend::adaptor_backend::AdaptorBackend;
 
     #[tokio::test]
     async fn test() {
-        let https_builder = HttpsBuilder::new(
+        init_tls_provider();
+
+        let backend = HttpsBackend::new(
             ["1.12.12.21:443".parse().unwrap()].into(),
             "doh.pub".to_string(),
             "/dns-query".to_string(),
         )
         .unwrap();
 
-        let generic_backend = AdaptorBackend::new(https_builder, 3).await.unwrap();
-
-        let dns_response = generic_backend
+        let dns_response = backend
             .send_request(
                 create_query_message(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),

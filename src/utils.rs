@@ -1,16 +1,23 @@
-use std::time::Duration;
+use std::num::NonZeroUsize;
 
-use tokio::time;
-use tokio::time::Timeout;
-
-pub trait TimeoutExt {
-    fn timeout(self, timeout: Duration) -> Timeout<Self>
-    where
-        Self: Sized;
-}
-
-impl<F: Future> TimeoutExt for F {
-    fn timeout(self, timeout: Duration) -> Timeout<Self> {
-        time::timeout(timeout, self)
+/// Retries the async operation up to `attempts` times.
+/// Uses `FnMut() -> Fut` with explicit `Fut: Send` bound so the future type is
+/// not over-constrained by `AsyncFnMut` (which can trigger "Send not general enough").
+pub async fn retry<T, E, F, Fut>(attempts: NonZeroUsize, mut f: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    for i in 0..attempts.get() {
+        match f().await {
+            Ok(res) => return Ok(res),
+            Err(err) => {
+                if i + 1 >= attempts.get() {
+                    return Err(err);
+                }
+            }
+        }
     }
+
+    unreachable!("")
 }

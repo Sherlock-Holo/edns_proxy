@@ -1,22 +1,28 @@
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use hickory_proto::quic::QuicClientStreamBuilder;
+use futures_util::TryStreamExt;
+use hickory_proto::op::Message;
+use hickory_proto::quic::{QuicClientStream, QuicClientStreamBuilder};
+use hickory_proto::xfer::{
+    DnsRequest, DnsRequestOptions, DnsRequestSender, DnsResponse, FirstAnswer,
+};
 use rand::prelude::*;
 use rand::rng;
 use rustls::{ClientConfig, RootCertStore};
+use tracing::instrument;
 
-use crate::backend::adaptor_backend::{BoxDnsRequestSender, DnsRequestSenderBuild};
+use crate::backend::Backend;
 
-#[derive(Debug, Clone)]
-pub struct QuicBuilder {
-    inner: Arc<QuicBuilderInner>,
+#[derive(Debug)]
+pub struct QuicBackend {
+    inner: Arc<QuicBackendInner>,
 }
 
-impl QuicBuilder {
+impl QuicBackend {
     pub fn new(addrs: HashSet<SocketAddr>, host: String) -> anyhow::Result<Self> {
         let mut root_cert_store = RootCertStore::empty();
         let certs = rustls_native_certs::load_native_certs();
@@ -38,18 +44,16 @@ impl QuicBuilder {
         builder.crypto_config(client_config);
 
         Ok(Self {
-            inner: Arc::new(QuicBuilderInner {
+            inner: Arc::new(QuicBackendInner {
                 addrs,
                 host,
                 builder,
+                stream_cache: RwLock::new(None),
             }),
         })
     }
-}
 
-#[async_trait]
-impl DnsRequestSenderBuild for QuicBuilder {
-    async fn build(&self) -> anyhow::Result<BoxDnsRequestSender> {
+    async fn build_stream(&self) -> anyhow::Result<QuicClientStream> {
         let addr = self
             .inner
             .addrs
@@ -58,29 +62,81 @@ impl DnsRequestSenderBuild for QuicBuilder {
             .choose(&mut rng())
             .expect("addrs must not empty");
 
-        let quic_client_stream = self
-            .inner
+        self.inner
             .builder
             .clone()
             .build(addr, self.inner.host.clone())
-            .await?;
+            .await
+            .map_err(Into::into)
+    }
 
-        Ok(BoxDnsRequestSender::new(quic_client_stream))
+    async fn do_send_with_stream(
+        stream: &mut QuicClientStream,
+        message: Message,
+    ) -> anyhow::Result<DnsResponse> {
+        stream
+            .try_next()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("quic stream connected but closed immediately"))?;
+
+        let mut options = DnsRequestOptions::default();
+        options.use_edns = true;
+        let request = DnsRequest::new(message, options);
+        let dns_response = stream.send_message(request).first_answer().await?;
+
+        Ok(dns_response)
+    }
+
+    #[instrument(skip(self), ret, err)]
+    async fn do_send(&self, message: Message) -> anyhow::Result<DnsResponse> {
+        let stream = self.inner.stream_cache.read().unwrap().clone();
+
+        if let Some(mut s) = stream {
+            match Self::do_send_with_stream(&mut s, message.clone()).await {
+                Ok(r) => return Ok(r),
+                Err(_) => {
+                    *self.inner.stream_cache.write().unwrap() = None;
+                }
+            }
+        }
+
+        let mut new_stream = self.build_stream().await?;
+        *self.inner.stream_cache.write().unwrap() = Some(new_stream.clone());
+
+        Self::do_send_with_stream(&mut new_stream, message).await
     }
 }
 
-struct QuicBuilderInner {
+struct QuicBackendInner {
     addrs: HashSet<SocketAddr>,
     host: String,
     builder: QuicClientStreamBuilder,
+    stream_cache: RwLock<Option<QuicClientStream>>,
 }
 
-impl Debug for QuicBuilderInner {
+impl Debug for QuicBackendInner {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("QuicManagerBuilderInner")
+        f.debug_struct("QuicBackendInner")
             .field("addrs", &self.addrs)
             .field("host", &self.host)
             .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl Backend for QuicBackend {
+    #[instrument(skip(self), ret, err)]
+    async fn send_request(
+        &self,
+        message: Message,
+        _src: SocketAddr,
+    ) -> anyhow::Result<DnsResponse> {
+        let res = self.do_send(message.clone()).await;
+        if res.is_ok() {
+            return res;
+        }
+
+        self.do_send(message).await
     }
 }
 
@@ -88,21 +144,20 @@ impl Debug for QuicBuilderInner {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
+    use super::super::tests::*;
     use super::*;
-    use crate::backend::tests::{check_dns_response, create_query_message};
-    use crate::backend::{AdaptorBackend, Backend};
 
     #[tokio::test]
     async fn test() {
-        let https_builder = QuicBuilder::new(
+        init_tls_provider();
+
+        let backend = QuicBackend::new(
             ["45.90.28.1:853".parse().unwrap()].into(),
             "dns.nextdns.io".to_string(),
         )
         .unwrap();
 
-        let generic_backend = AdaptorBackend::new(https_builder, 3).await.unwrap();
-
-        let dns_response = generic_backend
+        let dns_response = backend
             .send_request(
                 create_query_message(),
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),

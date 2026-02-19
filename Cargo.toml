@@ -1,14 +1,15 @@
 [package]
 name = "edns_proxy"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "1.0.101"
-async-notify = "0.3.3"
+async-notify = "0.3.4"
 async-trait = "0.1.89"
 cidr = "0.3.2"
 clap = { version = "4.5.59", features = ["derive", "env"] }
+deadpool = { version = "0.13.0", features = ["rt_tokio_1"] }
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 futures-util = "0.3.32"
 hickory-proto = { version = "0.25.2", features = ["https-aws-lc-rs"] } # disable dnssec to fix compile error
@@ -35,3 +36,15 @@ tracing-appender = "0.2.4"
 tracing-log = "0.2.0"
 tracing-opentelemetry = "0.32.1"
 tracing-subscriber = "0.3.22"
+
+[dependencies.opentelemetry-otlp]
+version = "0.31.0"
+default-features = false
+features = [
+    "internal-logs",
+    "grpc-tonic",
+    "logs",
+    "tls",
+    "tls-roots",
+    "trace",
+]
