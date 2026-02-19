@@ -6,6 +6,7 @@ use cidr::IpInet;
 use hickory_proto::op::Query;
 use hickory_proto::xfer::DnsResponse;
 use quick_cache::sync::Cache as S3FifoCache;
+use tracing::instrument;
 
 #[derive(Debug)]
 pub struct Cache {
@@ -25,6 +26,7 @@ impl Cache {
         }
     }
 
+    #[instrument(ret)]
     pub async fn get_cache_response(&self, query: Query, src_ip: IpAddr) -> Option<DnsResponse> {
         let prefix = match src_ip {
             IpAddr::V4(_) => self.ipv4_prefix,
@@ -35,6 +37,7 @@ impl Cache {
         self.get_response(query, ip_inet)
     }
 
+    #[instrument(ret)]
     pub async fn put_cache_response(&self, query: Query, src_ip: IpAddr, response: DnsResponse) {
         let prefix = match src_ip {
             IpAddr::V4(_) => self.ipv4_prefix,
@@ -60,6 +63,7 @@ struct CacheResponse {
 }
 
 impl Cache {
+    #[instrument(ret)]
     fn get_response(&self, query: Query, src_ip: IpInet) -> Option<DnsResponse> {
         let key = RequestKey { query, src_ip };
         let resp = self.inner.get(&key)?;
@@ -80,6 +84,7 @@ impl Cache {
         }
     }
 
+    #[instrument(ret)]
     fn add_response(&self, query: Query, src_ip: IpInet, response: DnsResponse) {
         let ttl = match response.answers().iter().map(|record| record.ttl()).min() {
             None => return,

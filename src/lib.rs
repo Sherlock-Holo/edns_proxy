@@ -78,6 +78,13 @@ const STYLES: styling::Styles = styling::Styles::styled()
     .literal(styling::AnsiColor::Blue.on_default().bold())
     .placeholder(styling::AnsiColor::Cyan.on_default());
 
+const DEFAULT_RETRY_ATTEMPTS: NonZeroUsize = const {
+    match NonZeroUsize::new(3) {
+        None => unreachable!(),
+        Some(v) => v,
+    }
+};
+
 #[derive(Debug, Parser)]
 #[command(styles = STYLES)]
 pub struct Args {
@@ -353,8 +360,15 @@ fn spawn_proxy_workers(
 
                     let cache = cache_config.map(|(cap, v4, v6)| Cache::new(cap, v4, v6));
 
-                    let task =
-                        start_proxy_with_socket(bind_addr, socket, route, backend, cache).await?;
+                    let task = start_proxy_with_socket(
+                        bind_addr,
+                        socket,
+                        route,
+                        backend,
+                        cache,
+                        proxy.retry_attempts.unwrap_or(DEFAULT_RETRY_ATTEMPTS),
+                    )
+                    .await?;
 
                     task.run_until_shutdown(shutdown).await
                 })

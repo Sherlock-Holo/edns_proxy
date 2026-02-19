@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,7 @@ use crate::addr::BindAddr;
 use crate::backend::DynBackend;
 use crate::cache::Cache;
 use crate::route::Route;
+use crate::utils::retry;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -83,18 +85,19 @@ impl ProxyTask {
 }
 
 /// Starts proxy with a pre-created socket (SO_REUSEPORT). Used for per-core workers.
-#[instrument(err)]
 pub async fn start_proxy_with_socket(
     bind_addr: Arc<BindAddr>,
     socket: BindSocket,
     route: Arc<Route>,
-    default_backend: crate::backend::DynBackend,
+    default_backend: DynBackend,
     cache: Option<Cache>,
+    attempts: NonZeroUsize,
 ) -> anyhow::Result<ProxyTask> {
     let mut server = ServerFuture::new(DnsHandler {
         cache,
         default_backend,
         route,
+        attempts,
     });
 
     match (&*bind_addr, socket) {
@@ -241,21 +244,25 @@ struct DnsHandler {
     cache: Option<Cache>,
     default_backend: DynBackend,
     route: Arc<Route>,
+    attempts: NonZeroUsize,
 }
 
 #[async_trait]
 impl RequestHandler for DnsHandler {
-    #[instrument(skip(response_handle), ret)]
+    #[instrument(skip(self, response_handle), ret)]
     async fn handle_request<R: ResponseHandler>(
         &self,
         request: &Request,
         response_handle: R,
     ) -> ResponseInfo {
-        let resp_result = if let Some(resp) = self.try_get_cache_response(request).await {
-            Ok(resp)
-        } else {
-            self.send_request(request).await
-        };
+        let resp_result = retry(self.attempts, async || {
+            if let Some(resp) = self.try_get_cache_response(request).await {
+                Ok(resp)
+            } else {
+                self.send_request(request).await
+            }
+        })
+        .await;
 
         match resp_result {
             Err(err) => {
@@ -291,7 +298,7 @@ impl RequestHandler for DnsHandler {
 }
 
 impl DnsHandler {
-    #[instrument]
+    #[instrument(skip(self), ret, err)]
     async fn send_request(&self, request: &Request) -> anyhow::Result<DnsResponse> {
         let query = request
             .queries()
@@ -308,9 +315,7 @@ impl DnsHandler {
 
         let response = backend.send_request(message, src_addr).await?;
 
-        if let Some(cache) = &self.cache
-            && let Some(query) = request.queries().first()
-        {
+        if let Some(cache) = &self.cache {
             cache
                 .put_cache_response(query.original().clone(), src_addr.ip(), response.clone())
                 .await;
@@ -343,6 +348,7 @@ impl DnsHandler {
             })
     }
 
+    #[instrument(skip(self), ret)]
     fn extract_message(&self, request: &Request) -> Message {
         let mut message = Message::new();
         message.set_header(*request.header());
@@ -371,6 +377,7 @@ impl DnsHandler {
         message
     }
 
+    #[instrument(skip(self), ret)]
     async fn try_get_cache_response(&self, request: &Request) -> Option<DnsResponse> {
         let cache = self.cache.as_ref()?;
 

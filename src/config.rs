@@ -33,6 +33,7 @@ pub struct Proxy {
     pub route: Vec<Route>,
     #[serde(default)]
     pub workers: WorkersConfig,
+    pub retry_attempts: Option<NonZeroUsize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -107,13 +108,6 @@ pub struct Backend {
     pub name: String,
     #[serde(flatten)]
     pub backend_detail: BackendDetail,
-    attempts: Option<usize>,
-}
-
-impl Backend {
-    pub fn attempts(&self) -> usize {
-        self.attempts.unwrap_or(3)
-    }
 }
 
 #[derive(Debug, Deserialize)]
