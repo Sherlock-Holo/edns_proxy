@@ -7,6 +7,7 @@ use hickory_proto::op::Message;
 use hickory_proto::xfer::DnsResponse;
 
 mod https;
+mod tls;
 mod udp;
 
 pub trait Backend: Debug {

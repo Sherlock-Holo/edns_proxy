@@ -750,6 +750,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",
+ "send_wrapper",
  "serde",
  "serde_yaml",
  "socket2 0.6.2",
