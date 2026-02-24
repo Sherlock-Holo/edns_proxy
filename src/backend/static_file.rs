@@ -183,6 +183,21 @@ impl Backend for StaticFileBackend {
     }
 }
 
+impl super::backend2::Backend for StaticFileBackend {
+    async fn send_request(
+        &self,
+        message: hickory_proto26::op::Message,
+        _src: SocketAddr,
+    ) -> anyhow::Result<hickory_proto26::op::DnsResponse> {
+        let message = Message::from_vec(&message.to_vec()?)?;
+        self.lookup_and_build_response(message).and_then(|resp| {
+            Ok(hickory_proto26::op::DnsResponse::from_buffer(
+                resp.to_vec()?,
+            )?)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
