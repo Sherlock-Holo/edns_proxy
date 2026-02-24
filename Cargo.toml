@@ -37,8 +37,10 @@ tracing-opentelemetry = "0.32.1"
 tracing-subscriber = "0.3.22"
 
 compio = { version = "0.18.0", features = ["macros", "net", "polling"] }
-#hickory-proto26 = { version = "0.26", git = "https://github.com/hickory-dns/hickory-dns/" }
-hickory-proto26 = { package = "hickory-proto", version = "0.26.0-alpha.1", path = "../fork/hickory-dns/crates/proto" }
+cyper = { version = "0.8.1", features = ["http2", "http3", "rustls", "stream"] }
+hickory-proto26 = { package = "hickory-proto", version = "0.26.0-alpha.1", git = "https://github.com/hickory-dns/hickory-dns/" }
+http = "1.4.0"
+#hickory-proto26 = { package = "hickory-proto", version = "0.26.0-alpha.1", path = "../fork/hickory-dns/crates/proto" }
 
 [dependencies.opentelemetry-otlp]
 version = "0.31.0"

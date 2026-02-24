@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use compio::net::UdpSocket;
 use hickory_proto::op::Message;
 use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
@@ -56,7 +55,6 @@ impl UdpBackend {
     }
 }
 
-#[async_trait(?Send)]
 impl Backend for UdpBackend {
     #[instrument(skip(self), ret, err)]
     async fn send_request(
