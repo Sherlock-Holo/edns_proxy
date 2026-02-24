@@ -6,23 +6,23 @@ use std::sync::Arc;
 use cyper::Client;
 use cyper::resolve::Resolve;
 use futures_util::{AsyncReadExt, Stream, TryStreamExt, stream};
-use hickory_proto::op::Message;
-use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
-use http::{StatusCode, Uri};
+use hickory_proto26::op::{DnsRequest, DnsRequestOptions, DnsResponse, Message};
+use http::{StatusCode, Uri, Version};
 use rand::rng;
 use rand::seq::IteratorRandom;
 use tracing::{error, instrument};
 
-use crate::backend::backend2::Backend;
+use super::Backend;
 
 #[derive(Debug)]
 pub struct HttpsBackend {
     url: String,
     client: Client,
+    is_h3: bool,
 }
 
 impl HttpsBackend {
-    pub fn new(url: String, ips: impl IntoIterator<Item = IpAddr>) -> Self {
+    pub fn new(url: String, ips: impl IntoIterator<Item = IpAddr>, is_h3: bool) -> Self {
         let resolver = Resolver {
             addrs: Arc::new(ips.into_iter().collect()),
         };
@@ -32,7 +32,7 @@ impl HttpsBackend {
             .use_rustls_default()
             .build();
 
-        Self { url, client }
+        Self { url, client, is_h3 }
     }
 }
 
@@ -48,9 +48,16 @@ impl Backend for HttpsBackend {
         let request = DnsRequest::new(message, options);
         let request = request.to_vec()?;
 
+        let version = if self.is_h3 {
+            Version::HTTP_3
+        } else {
+            Version::HTTP_2
+        };
+
         let response = self
             .client
             .post(&self.url)?
+            .version(version)
             .header("content-type", "application/dns-message")?
             .header("accept", "application/dns-message")?
             .body(request)
@@ -96,16 +103,38 @@ impl Resolve for Resolver {
 mod tests {
     use std::net::Ipv4Addr;
 
+    use super::super::tests::{check_dns_response, create_query_message, init_tls_provider};
     use super::*;
-    use crate::backend::tests::{check_dns_response, create_query_message, init_tls_provider};
 
     #[compio::test]
-    async fn test() {
+    async fn test_h2() {
         init_tls_provider();
 
         let backend = HttpsBackend::new(
             "https://doh.pub/dns-query".to_string(),
             ["1.12.12.21".parse().unwrap()],
+            false,
+        );
+
+        let dns_response = backend
+            .send_request(
+                create_query_message(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234),
+            )
+            .await
+            .unwrap();
+
+        check_dns_response(&dns_response);
+    }
+
+    #[compio::test]
+    async fn test_h3() {
+        init_tls_provider();
+
+        let backend = HttpsBackend::new(
+            "https://dns.nextdns.io/dns-query".to_string(),
+            ["45.90.28.1".parse().unwrap()],
+            true,
         );
 
         let dns_response = backend
