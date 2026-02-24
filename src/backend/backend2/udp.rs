@@ -3,8 +3,7 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use compio::net::UdpSocket;
-use hickory_proto::op::Message;
-use hickory_proto::xfer::{DnsRequest, DnsRequestOptions, DnsResponse};
+use hickory_proto26::op::{DnsRequest, DnsRequestOptions, DnsResponse, Message};
 use rand::prelude::*;
 use rand::rng;
 use tracing::instrument;
@@ -74,8 +73,8 @@ impl Backend for UdpBackend {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
+    use super::super::tests::{check_dns_response, create_query_message};
     use super::*;
-    use crate::backend::tests::{check_dns_response, create_query_message};
 
     #[compio::test]
     async fn test() {

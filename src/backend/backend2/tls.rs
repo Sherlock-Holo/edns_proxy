@@ -8,8 +8,7 @@ use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::tls::{TlsConnector, TlsStream};
 use deadpool::managed::{Manager, Metrics, Object, Pool, RecycleResult};
-use hickory_proto::op::Message;
-use hickory_proto::xfer::DnsResponse;
+use hickory_proto26::op::{DnsResponse, Message};
 use rand::rng;
 use rand::seq::IteratorRandom;
 use rustls::{ClientConfig, RootCertStore};
@@ -135,8 +134,8 @@ impl Manager for TlsStreamManager {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
+    use super::super::tests::{check_dns_response, create_query_message, init_tls_provider};
     use super::*;
-    use crate::backend::tests::{check_dns_response, create_query_message, init_tls_provider};
 
     #[compio::test]
     async fn test() {

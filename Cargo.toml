@@ -36,7 +36,8 @@ tracing-log = "0.2.0"
 tracing-opentelemetry = "0.32.1"
 tracing-subscriber = "0.3.22"
 
-compio = { version = "0.18.0", features = ["macros", "net", "rustls"] }
+arc-swap = "1.8.2"
+compio = { version = "0.18.0", features = ["macros", "net", "quic", "rustls", "time"] }
 cyper = { version = "0.8.1", features = ["http2", "http3", "rustls", "stream"] }
 hickory-proto26 = { package = "hickory-proto", version = "0.26.0-alpha.1", git = "https://github.com/hickory-dns/hickory-dns/" }
 http = "1.4.0"
