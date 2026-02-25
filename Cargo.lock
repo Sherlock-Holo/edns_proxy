@@ -737,6 +737,7 @@ dependencies = [
  "arc-swap",
  "async-notify",
  "async-trait",
+ "bytes",
  "cidr",
  "clap",
  "compio",

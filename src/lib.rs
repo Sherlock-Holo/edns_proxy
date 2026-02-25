@@ -55,6 +55,7 @@ mod layer;
 mod log;
 mod proxy;
 mod route;
+mod server;
 mod utils;
 mod wrr;
 
