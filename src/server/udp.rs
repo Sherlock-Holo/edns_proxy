@@ -1,10 +1,8 @@
 use std::net::SocketAddr;
 use std::rc::Rc;
 
-use bytes::BytesMut;
 use compio::net::UdpSocket;
-use compio::runtime::BufferPool;
-use compio::{BufResult, runtime};
+use compio::runtime::{self, BufferPool};
 use hickory_proto26::op::{DnsResponse, Message, ResponseCode};
 use tracing::{debug, error, instrument};
 
@@ -20,35 +18,32 @@ impl UdpServer {
     pub fn new<B: Backend + 'static>(udp_socket: UdpSocket, backend: B) -> anyhow::Result<Self> {
         Ok(Self {
             udp_socket,
-            buffer_pool: BufferPool::new(2048, 8192)?,
+            buffer_pool: BufferPool::new(10, 8192)?,
             backend: Rc::new(backend),
         })
     }
 
     pub async fn run(self) {
-        let mut buf = BytesMut::with_capacity(8192);
-
         loop {
-            buf.clear();
-            buf.reserve(8192);
-
-            let BufResult(res, ret_buf) = self.udp_socket.recv_from(buf).await;
-            buf = ret_buf;
-            let src = match res {
+            let res = self
+                .udp_socket
+                .recv_from_managed(&self.buffer_pool, 8192)
+                .await;
+            let (buf, src) = match res {
                 Err(err) => {
                     error!(%err, "recv udp socket failed");
 
                     continue;
                 }
 
-                Ok((n, src)) => {
-                    if n == 0 {
+                Ok((buf, src)) => {
+                    if buf.is_empty() {
                         error!(%src, "recv empty udp socket");
 
                         continue;
                     }
 
-                    src
+                    (buf, src)
                 }
             };
 
