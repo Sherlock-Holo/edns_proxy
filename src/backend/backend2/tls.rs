@@ -28,7 +28,7 @@ impl Backend for TlsBackend {
         let request_data = message.to_vec()?;
         let mut tls_stream = self.pool.get().await?;
 
-        match Self::send_and_recv(&mut tls_stream, request_data).await {
+        match self.send_and_recv(&mut tls_stream, request_data).await {
             Err(err) => {
                 let _ = Object::take(tls_stream);
 
@@ -70,6 +70,7 @@ impl TlsBackend {
 
     #[instrument(skip(request_data), ret, err)]
     async fn send_and_recv(
+        &self,
         tls_stream: &mut TlsStream<TcpStream>,
         request_data: Vec<u8>,
     ) -> anyhow::Result<DnsResponse> {

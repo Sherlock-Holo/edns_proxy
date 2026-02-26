@@ -1,4 +1,8 @@
+use std::io;
 use std::num::NonZeroUsize;
+use std::time::Duration;
+
+use compio::{BufResult, time};
 
 /// Retries the async operation up to `attempts` times.
 /// Uses `FnMut() -> Fut` with explicit `Fut: Send` bound so the future type is
@@ -21,4 +25,34 @@ where
     }
 
     unreachable!("")
+}
+
+pub trait TimeoutExt: Future {
+    async fn timeout(self, dur: Duration) -> io::Result<Self::Output>;
+}
+
+impl<F: Future> TimeoutExt for F {
+    #[inline]
+    async fn timeout(self, dur: Duration) -> io::Result<Self::Output> {
+        time::timeout(dur, self)
+            .await
+            .map_err(|err| io::Error::new(io::ErrorKind::TimedOut, err))
+    }
+}
+
+pub trait PartsExt {
+    type Output;
+
+    fn to_parts(self) -> Self::Output;
+}
+
+impl<T, B> PartsExt for BufResult<T, B> {
+    type Output = (io::Result<T>, B);
+
+    #[inline]
+    fn to_parts(self) -> Self::Output {
+        let BufResult(res, buf) = self;
+
+        (res, buf)
+    }
 }

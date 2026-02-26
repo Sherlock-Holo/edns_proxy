@@ -33,6 +33,7 @@ use tracing::{error, instrument};
 
 use crate::backend::backend2::DynBackend;
 
+#[derive(Debug)]
 struct HttpError(anyhow::Error);
 
 impl From<anyhow::Error> for HttpError {
