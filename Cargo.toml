@@ -40,6 +40,7 @@ tracing-subscriber = "0.3.22"
 arc-swap = "1.8.2"
 axum = { version = "0.8.8", default-features = false, features = ["http2", "tower-log", "tracing"] }
 compio = { version = "0.18.0", features = ["macros", "net", "quic", "rustls", "time"] }
+compio-quic = { version = "0.7.0", default-features = false, features = ["h3"] }
 cyper = { version = "0.8.1", default-features = false, features = ["http2", "http3", "rustls", "stream"] }
 cyper-axum = { version = "0.8.0", features = ["http2"] }
 hickory-proto26 = { package = "hickory-proto", version = "0.26.0-alpha.1", git = "https://github.com/hickory-dns/hickory-dns/" }

@@ -809,6 +809,7 @@ dependencies = [
  "cidr",
  "clap",
  "compio",
+ "compio-quic",
  "cyper",
  "cyper-axum",
  "deadpool",
