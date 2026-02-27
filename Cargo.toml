@@ -45,6 +45,7 @@ cyper = { version = "0.8.1", default-features = false, features = ["http2", "htt
 cyper-axum = { version = "0.8.0", features = ["http2"] }
 hickory-proto26 = { package = "hickory-proto", version = "0.26.0-alpha.1", git = "https://github.com/hickory-dns/hickory-dns/" }
 http = "1.4.0"
+http-body = "1.0.1"
 http-body-util = "0.1.3"
 send_wrapper = "0.6.0"
 tower-http = { version = "0.6.8", features = ["trace"] }

@@ -1,13 +1,12 @@
 use std::convert::Infallible;
 use std::fmt::Debug;
-use std::future::{Ready, ready};
+use std::future::{Ready, poll_fn, ready};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
-use std::time::Duration;
+use std::task::{Context as TaskContext, Poll, ready};
 
 use anyhow::Context;
 use axum::Router;
@@ -15,21 +14,27 @@ use axum::body::Body;
 use axum::extract::{Extension, Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use bytes::Buf;
+use bytes::{Bytes, BytesMut};
 use compio::net::{TcpListener, TcpStream};
+use compio::runtime;
 use compio::tls::{TlsAcceptor, TlsStream};
+use compio_quic::h3::server::RequestResolver;
+use compio_quic::{Endpoint, h3};
 use cyper_axum::Listener;
 use futures_util::future::LocalBoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{FutureExt, StreamExt, select};
+use futures_util::{FutureExt, StreamExt, select, stream};
 use hickory_proto26::op::Message;
 use http::{Request as HttpRequest, StatusCode};
-use http_body_util::{BodyExt, Limited};
+use http_body::Frame;
+use http_body_util::{BodyExt, Limited, StreamBody};
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use send_wrapper::SendWrapper;
 use tower::Service;
 use tower_http::trace::TraceLayer;
-use tracing::{error, instrument};
+use tracing::{error, info, instrument};
 
 use crate::backend::backend2::DynBackend;
 
@@ -87,11 +92,9 @@ where
 }
 
 pub struct HttpsServer {
-    tls_acceptor: TlsAcceptor,
-    tcp_listener: TcpListener,
+    kind: HttpServerKind,
     path: String,
     backend: Rc<dyn DynBackend>,
-    timeout: Option<Duration>,
 }
 
 impl Debug for HttpsServer {
@@ -103,13 +106,12 @@ impl Debug for HttpsServer {
 }
 
 impl HttpsServer {
-    pub async fn new(
+    pub async fn new_h2(
         addr: SocketAddr,
         certificate: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
         path: String,
         backend: Rc<dyn DynBackend>,
-        timeout: Option<Duration>,
     ) -> anyhow::Result<HttpsServer> {
         let server_config = ServerConfig::builder()
             .with_no_client_auth()
@@ -119,11 +121,12 @@ impl HttpsServer {
         let tcp_listener = TcpListener::bind(addr).await?;
 
         Ok(Self {
-            tls_acceptor,
-            tcp_listener,
+            kind: HttpServerKind::Http2 {
+                tls_acceptor,
+                tcp_listener,
+            },
             path,
             backend,
-            timeout,
         })
     }
 
@@ -163,16 +166,176 @@ impl HttpsServer {
             .layer(TraceLayer::new_for_http())
             .with_state(SendWrapper::new(self.backend));
 
-        let tls_listener = TlsListener {
-            tls_acceptor: self.tls_acceptor,
-            tcp_listener: self.tcp_listener,
-            tls_accept_futs: Default::default(),
-        };
+        match self.kind {
+            HttpServerKind::Http2 {
+                tls_acceptor,
+                tcp_listener,
+            } => {
+                let tls_listener = TlsListener {
+                    tls_acceptor,
+                    tcp_listener,
+                    tls_accept_futs: Default::default(),
+                };
 
-        cyper_axum::serve(tls_listener, PeerAddrMakeService::new(router)).await?;
+                cyper_axum::serve(tls_listener, PeerAddrMakeService::new(router)).await?;
+            }
+            HttpServerKind::Http3 { endpoint } => {
+                Self::run_h3(endpoint, router).await?;
+            }
+        }
 
-        Err(anyhow::anyhow!("https server stopped unexpectedly"))
+        Err(anyhow::anyhow!("http server stopped unexpectedly"))
     }
+
+    async fn run_h3(endpoint: Endpoint, router: Router) -> anyhow::Result<()> {
+        while let Some(incoming) = endpoint.wait_incoming().await {
+            match incoming.await {
+                Err(err) => {
+                    error!(%err, "accept QUIC incoming failed");
+                    continue;
+                }
+
+                Ok(connection) => {
+                    let router = router.clone();
+                    runtime::spawn(async move {
+                        if let Err(err) = Self::handle_h3_connection(connection, router).await {
+                            error!(%err, "h3 connection error");
+                        }
+                    })
+                    .detach();
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("http3 server stopped unexpectedly"))
+    }
+
+    async fn handle_h3_connection(
+        connection: compio_quic::Connection,
+        router: Router,
+    ) -> anyhow::Result<()> {
+        let mut h3_server_connection = h3::server::Connection::new(connection).await?;
+
+        while let Some(request) = h3_server_connection.accept().await.transpose() {
+            let request = match request {
+                Err(err) => {
+                    error!(%err, "accept h3 connection failed");
+                    continue;
+                }
+
+                Ok(request) => request,
+            };
+
+            let router = router.clone();
+            runtime::spawn(async move {
+                if let Err(err) = Self::handle_h3_request(request, router).await {
+                    error!(%err, "handle h3 request error");
+                }
+            })
+            .detach();
+        }
+
+        info!("h3 connection stopped");
+        Ok(())
+    }
+
+    #[instrument(skip_all, ret, err)]
+    async fn handle_h3_request(
+        request_resolver: RequestResolver<compio_quic::Connection, Bytes>,
+        mut router: Router,
+    ) -> anyhow::Result<()> {
+        let (raw_req, req_stream) = request_resolver.resolve_request().await?;
+
+        let mut req_builder = Request::builder()
+            .version(raw_req.version())
+            .uri(raw_req.uri())
+            .method(raw_req.method());
+
+        for (k, v) in raw_req.headers() {
+            req_builder = req_builder.header(k, v);
+        }
+
+        let (mut send_stream, recv_stream) = req_stream.split();
+        let mut recv_stream = SendWrapper::new(recv_stream);
+        let mut no_more_data = false;
+        let body = Body::new(StreamBody::new(stream::poll_fn(move |cx| {
+            loop {
+                if no_more_data {
+                    return recv_stream
+                        .poll_recv_trailers(cx)
+                        .map(|res| res.transpose().map(|res| res.map(Frame::trailers)));
+                }
+
+                let res = ready!(recv_stream.poll_recv_data(cx)).transpose();
+                match res {
+                    None => {
+                        no_more_data = true;
+                        continue;
+                    }
+
+                    Some(res) => {
+                        return Poll::Ready(Some(res.map(|mut data| {
+                            let mut buf = BytesMut::with_capacity(data.remaining());
+                            while data.has_remaining() {
+                                buf.extend_from_slice(data.chunk());
+                                data.advance(data.chunk().len());
+                            }
+
+                            Frame::data(buf.freeze())
+                        })));
+                    }
+                }
+            }
+        })));
+
+        let request = req_builder
+            .body(body)
+            .with_context(|| "create request failed")?;
+
+        poll_fn(|cx| Service::<Request>::poll_ready(&mut router, cx)).await?;
+
+        let mut response = router.call(request).await?;
+
+        // send response
+        let mut raw_response_builder = http::Response::builder()
+            .status(response.status())
+            .version(response.version());
+
+        for (k, v) in response.headers() {
+            raw_response_builder = raw_response_builder.header(k, v);
+        }
+
+        send_stream
+            .send_response(raw_response_builder.body(())?)
+            .await?;
+
+        while let Some(frame) = response.body_mut().frame().await {
+            let frame = frame.with_context(|| "receive response frame failed")?;
+            if frame.is_data() {
+                send_stream
+                    .send_data(frame.into_data().unwrap())
+                    .await
+                    .with_context(|| "send response data to send_stream failed")?;
+            } else if frame.is_trailers() {
+                send_stream
+                    .send_trailers(frame.into_trailers().unwrap())
+                    .await
+                    .with_context(|| "send response trailers to send_stream failed")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+enum HttpServerKind {
+    Http2 {
+        tls_acceptor: TlsAcceptor,
+        tcp_listener: TcpListener,
+    },
+    Http3 {
+        endpoint: Endpoint,
+    },
 }
 
 impl<S> Service<cyper_axum::IncomingStream<'_, TlsListener>> for PeerAddrMakeService<S>
