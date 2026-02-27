@@ -15,7 +15,7 @@ use rustls::{ClientConfig, RootCertStore};
 use send_wrapper::SendWrapper;
 use tracing::{debug, instrument};
 
-use super::Backend;
+use super::{Backend, DnsResponseWrapper};
 
 #[derive(Debug)]
 pub struct TlsBackend {
@@ -23,8 +23,12 @@ pub struct TlsBackend {
 }
 
 impl Backend for TlsBackend {
-    #[instrument(skip(self), ret, err)]
-    async fn send_request(&self, message: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
+    #[instrument(skip(self), ret(Display), err)]
+    async fn send_request(
+        &self,
+        message: Message,
+        _: SocketAddr,
+    ) -> anyhow::Result<DnsResponseWrapper> {
         let request_data = message.to_vec()?;
         let mut tls_stream = self.pool.get().await?;
 
@@ -68,12 +72,12 @@ impl TlsBackend {
         })
     }
 
-    #[instrument(skip(request_data), ret, err)]
+    #[instrument(skip(request_data), ret(Display), err)]
     async fn send_and_recv(
         &self,
         tls_stream: &mut TlsStream<TcpStream>,
         request_data: Vec<u8>,
-    ) -> anyhow::Result<DnsResponse> {
+    ) -> anyhow::Result<DnsResponseWrapper> {
         let request_len = (request_data.len() as u16).to_be_bytes();
 
         tls_stream.write_all(request_len).await.0?;
@@ -95,7 +99,7 @@ impl TlsBackend {
             .await;
         res?;
 
-        Ok(DnsResponse::from_buffer(resp_data)?)
+        Ok(DnsResponse::from_buffer(resp_data)?.into())
     }
 }
 

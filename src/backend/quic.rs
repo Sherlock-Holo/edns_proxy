@@ -17,7 +17,7 @@ use rand::seq::IteratorRandom;
 use rustls::RootCertStore;
 use tracing::{error, info, instrument};
 
-use super::Backend;
+use super::{Backend, DnsResponseWrapper};
 
 #[derive(Debug)]
 pub struct QuicBackend {
@@ -39,9 +39,10 @@ impl QuicBackend {
             root_cert_store.add(cert)?;
         }
 
-        let client_config = rustls::ClientConfig::builder()
+        let mut client_config = rustls::ClientConfig::builder()
             .with_root_certificates(root_cert_store)
             .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"doq".to_vec()];
 
         let endpoint = Endpoint::new(
             UdpSocket::bind(SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0)).await?,
@@ -95,7 +96,7 @@ impl QuicBackend {
         }
     }
 
-    #[instrument(ret, err)]
+    #[instrument(skip(endpoint), ret, err)]
     async fn connect_to(
         endpoint: &Endpoint,
         addr: SocketAddr,
@@ -116,12 +117,12 @@ impl QuicBackend {
 }
 
 impl Backend for QuicBackend {
-    #[instrument(skip(self), ret, err)]
+    #[instrument(skip(self), ret(Display), err)]
     async fn send_request(
         &self,
         mut message: Message,
         _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponse> {
+    ) -> anyhow::Result<DnsResponseWrapper> {
         // RFC: When sending queries over a QUIC connection, the DNS Message ID MUST be set to 0.
         // The stream mapping for DoQ allows for unambiguous correlation of queries and responses,
         // so the Message ID field is not required.
@@ -150,7 +151,7 @@ impl Backend for QuicBackend {
         let BufResult(res, resp_data) = rx.read_exact(Vec::with_capacity(resp_len as usize)).await;
         res?;
 
-        Ok(DnsResponse::from_buffer(resp_data)?)
+        Ok(DnsResponse::from_buffer(resp_data)?.into())
     }
 }
 
@@ -166,8 +167,8 @@ mod tests {
         init_tls_provider();
 
         let backend = QuicBackend::new(
-            ["149.28.148.222:853".parse().unwrap()].into(),
-            "dns.nextdns.io".to_string(),
+            ["223.5.5.5:853".parse().unwrap()].into(),
+            "dns.alidns.com".to_string(),
         )
         .await
         .unwrap();

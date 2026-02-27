@@ -55,16 +55,20 @@ mod tests {
     use std::io::Cursor;
     use std::net::SocketAddr;
 
-    use hickory_proto26::op::{DnsResponse, Message};
+    use hickory_proto26::op::Message;
 
     use super::*;
-    use crate::backend::Backend;
+    use crate::backend::{Backend, DnsResponseWrapper};
 
     #[derive(Debug, Copy, Clone, Eq, PartialEq)]
     struct TestBackend;
 
     impl Backend for TestBackend {
-        async fn send_request(&self, _: Message, _: SocketAddr) -> anyhow::Result<DnsResponse> {
+        async fn send_request(
+            &self,
+            _: Message,
+            _: SocketAddr,
+        ) -> anyhow::Result<DnsResponseWrapper> {
             panic!("just for test")
         }
     }

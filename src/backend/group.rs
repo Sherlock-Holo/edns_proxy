@@ -3,9 +3,9 @@ use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::rc::Rc;
 
-use hickory_proto26::op::{DnsResponse, Message};
+use hickory_proto26::op::Message;
 
-use super::{Backend, DynBackend};
+use super::{Backend, DnsResponseWrapper, DynBackend};
 use crate::wrr::SmoothWeight;
 
 #[derive(Clone)]
@@ -36,7 +36,11 @@ impl Group {
 }
 
 impl Backend for Group {
-    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
+    async fn send_request(
+        &self,
+        message: Message,
+        src: SocketAddr,
+    ) -> anyhow::Result<DnsResponseWrapper> {
         let backend = self
             .backends
             .borrow_mut()

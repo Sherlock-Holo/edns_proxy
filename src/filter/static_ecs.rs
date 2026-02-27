@@ -1,14 +1,13 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::rc::Rc;
 
-use hickory_proto26::op::DnsResponse as DnsResponse26;
 use hickory_proto26::op::{Edns as Edns26, Message as Message26};
 use hickory_proto26::rr::rdata::opt::{
     ClientSubnet as ClientSubnet26, EdnsCode as EdnsCode26, EdnsOption as EdnsOption26,
 };
 use tower::Layer;
 
-use crate::backend::{Backend, DynBackend};
+use crate::backend::{Backend, DnsResponseWrapper, DynBackend};
 
 #[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct StaticEcsFilterLayer {
@@ -49,7 +48,7 @@ impl Backend for StaticEcsFilter<Rc<dyn DynBackend>> {
         &self,
         mut message: Message26,
         src: SocketAddr,
-    ) -> anyhow::Result<DnsResponse26> {
+    ) -> anyhow::Result<DnsResponseWrapper> {
         let extensions = message.extensions_mut();
         let opt = extensions.get_or_insert_with(Edns26::new).options_mut();
         if opt.get(EdnsCode26::Subnet).is_none() {

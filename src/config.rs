@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::fs::File;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
@@ -115,8 +115,8 @@ pub struct Backend {
 pub enum BackendDetail {
     Tls(TlsBackend),
     Udp(UdpBackend),
-    Https(HttpsBasedBackend),
-    H3(HttpsBasedBackend),
+    Https(HttpsBackend),
+    H3(HttpsBackend),
     Quic(TlsBackend),
     StaticFile(StaticFileBackend),
 
@@ -166,24 +166,9 @@ impl TlsBackend {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct HttpsBasedBackend {
-    pub host: String,
-    #[serde(default = "HttpsBasedBackend::default_path")]
-    pub path: String,
-    #[serde(default = "HttpsBasedBackend::default_port")]
-    pub port: u16,
-    #[serde(flatten)]
-    pub bootstrap_or_addrs: BootstrapOrAddrs,
-}
-
-impl HttpsBasedBackend {
-    const fn default_port() -> u16 {
-        443
-    }
-
-    fn default_path() -> String {
-        "/dns-query".to_string()
-    }
+pub struct HttpsBackend {
+    pub url: String,
+    pub ips: HashSet<IpAddr>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

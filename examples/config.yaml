@@ -112,10 +112,9 @@ backend:
 
   - name: doh-pub
     type: https
-    host: doh.pub
-    path: /dns-query
-    bootstrap:
-      - 1.0.0.1:53
+    url: https://doh.pub/dns-query
+    ips:
+      - 1.12.12.21
 
   - name: udp
     type: udp
@@ -124,10 +123,9 @@ backend:
 
   - name: h3
     type: h3
-    host: dns.alidns.com
-    path: /dns-query
-    bootstrap:
-      - 1.0.0.1:53
+    url: https://dns.nextdns.io/dns-query
+    ips:
+      - 45.90.28.1
 
   - name: quic
     type: quic

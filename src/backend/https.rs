@@ -12,7 +12,7 @@ use rand::rng;
 use rand::seq::IteratorRandom;
 use tracing::{error, instrument};
 
-use super::Backend;
+use super::{Backend, DnsResponseWrapper};
 
 #[derive(Debug)]
 pub struct HttpsBackend {
@@ -37,12 +37,12 @@ impl HttpsBackend {
 }
 
 impl Backend for HttpsBackend {
-    #[instrument(skip(self), ret, err)]
+    #[instrument(skip(self), ret(Display), err)]
     async fn send_request(
         &self,
         message: Message,
         _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponse> {
+    ) -> anyhow::Result<DnsResponseWrapper> {
         let mut options = DnsRequestOptions::default();
         options.use_edns = true;
         let request = DnsRequest::new(message, options);
@@ -80,7 +80,7 @@ impl Backend for HttpsBackend {
         let mut buf = Vec::with_capacity(4096);
         resp_stream.read_to_end(&mut buf).await?;
 
-        Ok(DnsResponse::from_buffer(buf)?)
+        Ok(DnsResponse::from_buffer(buf)?.into())
     }
 }
 
@@ -132,8 +132,8 @@ mod tests {
         init_tls_provider();
 
         let backend = HttpsBackend::new(
-            "https://dns.nextdns.io/dns-query".to_string(),
-            ["45.90.28.1".parse().unwrap()],
+            "https://dns.alidns.com/dns-query".to_string(),
+            ["223.5.5.5".parse().unwrap()],
             true,
         );
 

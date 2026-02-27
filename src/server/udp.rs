@@ -89,7 +89,7 @@ impl UdpServer {
                         return;
                     }
 
-                    Ok(response) => response,
+                    Ok(response) => response.into(),
                 }
             }
 

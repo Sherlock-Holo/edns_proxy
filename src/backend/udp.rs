@@ -8,7 +8,7 @@ use rand::prelude::*;
 use rand::rng;
 use tracing::instrument;
 
-use super::Backend;
+use super::{Backend, DnsResponseWrapper};
 
 #[derive(Debug)]
 pub struct UdpBackend {
@@ -21,8 +21,8 @@ impl UdpBackend {
         Self { addrs, timeout }
     }
 
-    #[instrument(skip(self), ret, err)]
-    async fn do_send(&self, message: Message) -> anyhow::Result<DnsResponse> {
+    #[instrument(skip(self), ret(Display), err)]
+    async fn do_send(&self, message: Message) -> anyhow::Result<DnsResponseWrapper> {
         let addr = self
             .addrs
             .iter()
@@ -50,7 +50,7 @@ impl UdpBackend {
         res.0?;
         let data = res.1;
 
-        Ok(DnsResponse::from_buffer(data)?)
+        Ok(DnsResponse::from_buffer(data)?.into())
     }
 }
 
@@ -60,11 +60,12 @@ impl Backend for UdpBackend {
         &self,
         message: Message,
         _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponse> {
+    ) -> anyhow::Result<DnsResponseWrapper> {
         let r = self.do_send(message.clone()).await;
         if r.is_ok() {
             return r;
         }
+
         self.do_send(message).await
     }
 }

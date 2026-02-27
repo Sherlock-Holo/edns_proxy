@@ -5,7 +5,7 @@ use hickory_proto26::op::{DnsResponse, Message, ResponseCode};
 use hickory_proto26::rr::{Name, RData, Record, RecordType};
 use tracing::{info, instrument};
 
-use super::Backend;
+use super::{Backend, DnsResponseWrapper};
 use crate::config::StaticFileBackendConfig;
 
 const DEFAULT_TTL: u32 = 3600; // 1 hour
@@ -78,8 +78,8 @@ impl StaticFileBackend {
         })
     }
 
-    #[instrument(skip(self), ret, err)]
-    fn lookup_and_build_response(&self, message: Message) -> anyhow::Result<DnsResponse> {
+    #[instrument(skip(self), ret(Display), err)]
+    fn lookup_and_build_response(&self, message: Message) -> anyhow::Result<DnsResponseWrapper> {
         let query = message
             .queries()
             .first()
@@ -108,7 +108,9 @@ impl StaticFileBackend {
             response.set_response_code(ResponseCode::NXDomain);
         }
 
-        DnsResponse::from_message(response).map_err(Into::into)
+        DnsResponse::from_message(response)
+            .map(Into::into)
+            .map_err(Into::into)
     }
 
     fn lookup_ips(&self, query_name: Name, query_type: RecordType) -> Option<Vec<RData>> {
@@ -165,7 +167,7 @@ impl Backend for StaticFileBackend {
         &self,
         message: Message,
         _src: SocketAddr,
-    ) -> anyhow::Result<DnsResponse> {
+    ) -> anyhow::Result<DnsResponseWrapper> {
         let message = Message::from_vec(&message.to_vec()?)?;
 
         self.lookup_and_build_response(message)

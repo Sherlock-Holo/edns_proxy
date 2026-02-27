@@ -5,7 +5,9 @@ mod static_file;
 mod tls;
 mod udp;
 
+use std::fmt::{Debug, Display, Formatter};
 use std::net::SocketAddr;
+use std::ops::{Deref, DerefMut};
 
 use futures_util::FutureExt;
 use futures_util::future::LocalBoxFuture;
@@ -19,7 +21,62 @@ pub use self::tls::TlsBackend;
 pub use self::udp::UdpBackend;
 
 pub trait Backend {
-    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse>;
+    async fn send_request(
+        &self,
+        message: Message,
+        src: SocketAddr,
+    ) -> anyhow::Result<DnsResponseWrapper>;
+}
+
+#[derive(Clone)]
+pub struct DnsResponseWrapper(pub DnsResponse);
+
+impl DnsResponseWrapper {
+    pub fn into_inner(self) -> DnsResponse {
+        self.0
+    }
+
+    pub fn into_buffer(self) -> Vec<u8> {
+        self.0.into_buffer()
+    }
+}
+
+impl From<DnsResponse> for DnsResponseWrapper {
+    fn from(value: DnsResponse) -> Self {
+        DnsResponseWrapper(value)
+    }
+}
+
+impl From<DnsResponseWrapper> for DnsResponse {
+    fn from(value: DnsResponseWrapper) -> Self {
+        value.0
+    }
+}
+
+impl Deref for DnsResponseWrapper {
+    type Target = DnsResponse;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DnsResponseWrapper {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Debug for DnsResponseWrapper {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        <Message as Debug>::fmt(&self.0, f)
+    }
+}
+
+impl Display for DnsResponseWrapper {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        <Message as Display>::fmt(&self.0, f)
+    }
 }
 
 pub trait DynBackend {
@@ -27,7 +84,7 @@ pub trait DynBackend {
         &self,
         message: Message,
         src: SocketAddr,
-    ) -> LocalBoxFuture<'_, anyhow::Result<DnsResponse>>;
+    ) -> LocalBoxFuture<'_, anyhow::Result<DnsResponseWrapper>>;
 }
 
 impl<T: Backend> DynBackend for T {
@@ -35,7 +92,7 @@ impl<T: Backend> DynBackend for T {
         &self,
         message: Message,
         src: SocketAddr,
-    ) -> LocalBoxFuture<'_, anyhow::Result<DnsResponse>> {
+    ) -> LocalBoxFuture<'_, anyhow::Result<DnsResponseWrapper>> {
         self.send_request(message, src).boxed_local()
     }
 }

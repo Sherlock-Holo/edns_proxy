@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use hickory_proto26::op::{DnsResponse, Message};
 
-use crate::backend::{Backend, DynBackend};
+use crate::backend::{Backend, DnsResponseWrapper, DynBackend};
 use crate::cache::Cache;
 use crate::route::Route;
 use crate::utils::retry;
@@ -33,7 +33,11 @@ impl ProxyBackend {
 }
 
 impl Backend for ProxyBackend {
-    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
+    async fn send_request(
+        &self,
+        message: Message,
+        src: SocketAddr,
+    ) -> anyhow::Result<DnsResponseWrapper> {
         let query = message
             .queries()
             .first()
@@ -43,7 +47,7 @@ impl Backend for ProxyBackend {
         if let Some(cache) = &self.cache
             && let Some(resp) = cache.get_cache_response(query.clone(), src.ip())
         {
-            return Ok(resp);
+            return Ok(resp.into());
         }
 
         let backend = self
@@ -56,7 +60,8 @@ impl Backend for ProxyBackend {
         .await?;
 
         if let Some(cache) = &self.cache {
-            cache.put_cache_response(query, src.ip(), response.clone());
+            let dns_response: DnsResponse = response.clone().into();
+            cache.put_cache_response(query, src.ip(), dns_response);
         }
 
         Ok(response)

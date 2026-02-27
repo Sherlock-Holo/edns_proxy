@@ -173,26 +173,8 @@ async fn collect_backends(
                 timeout.map(|timeout| timeout.into_inner()),
             )),
 
-            BackendDetail::Https(config::HttpsBasedBackend {
-                host,
-                path,
-                port,
-                bootstrap_or_addrs,
-            }) => {
-                let addrs = match bootstrap_or_addrs {
-                    BootstrapOrAddrs::Bootstrap(bootstrap) => {
-                        bootstrap_domain(bootstrap, host, *port).await?
-                    }
-
-                    BootstrapOrAddrs::Addr(addrs) => addrs.clone(),
-                };
-
-                let url = format!("https://{host}:{port}{path}");
-                Rc::new(HttpsBackend::new(
-                    url,
-                    addrs.into_iter().map(|addr| addr.ip()),
-                    false,
-                ))
+            BackendDetail::Https(config::HttpsBackend { url, ips }) => {
+                Rc::new(HttpsBackend::new(url.clone(), ips.iter().copied(), false))
             }
 
             BackendDetail::Quic(config::TlsBackend {
@@ -210,25 +192,8 @@ async fn collect_backends(
                 Rc::new(QuicBackend::new(addrs, tls_name.to_string()).await?)
             }
 
-            BackendDetail::H3(config::HttpsBasedBackend {
-                host,
-                path,
-                port,
-                bootstrap_or_addrs,
-            }) => {
-                let addrs = match bootstrap_or_addrs {
-                    BootstrapOrAddrs::Bootstrap(bootstrap) => {
-                        bootstrap_domain(bootstrap, host, *port).await?
-                    }
-                    BootstrapOrAddrs::Addr(addrs) => addrs.clone(),
-                };
-
-                let url = format!("https://{host}:{port}{path}");
-                Rc::new(HttpsBackend::new(
-                    url,
-                    addrs.into_iter().map(|addr| addr.ip()),
-                    true,
-                ))
+            BackendDetail::H3(config::HttpsBackend { url, ips }) => {
+                Rc::new(HttpsBackend::new(url.clone(), ips.iter().copied(), true))
             }
 
             BackendDetail::StaticFile(static_config) => {
