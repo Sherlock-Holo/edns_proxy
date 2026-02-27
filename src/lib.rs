@@ -436,7 +436,10 @@ fn spawn_proxy_workers(
         let handle = thread::spawn(move || {
             let mut builder = Runtime::builder();
             let mut proactor_builder = Proactor::builder();
-            proactor_builder.coop_taskrun(true).taskrun_flag(true);
+            proactor_builder
+                .capacity(128)
+                .coop_taskrun(true)
+                .taskrun_flag(true);
 
             let runtime = builder.with_proactor(proactor_builder).build().unwrap();
 
