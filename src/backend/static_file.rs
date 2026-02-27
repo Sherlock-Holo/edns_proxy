@@ -168,8 +168,6 @@ impl Backend for StaticFileBackend {
         message: Message,
         _src: SocketAddr,
     ) -> anyhow::Result<DnsResponseWrapper> {
-        let message = Message::from_vec(&message.to_vec()?)?;
-
         self.lookup_and_build_response(message)
     }
 }
