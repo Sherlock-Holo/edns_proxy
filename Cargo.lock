@@ -1172,7 +1172,7 @@ checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 [[package]]
 name = "hickory-proto"
 version = "0.26.0-alpha.1"
-source = "git+https://github.com/hickory-dns/hickory-dns/#f8795e4dd942a87a9346531c8acd5759bfb0c942"
+source = "git+https://github.com/hickory-dns/hickory-dns/#6aaeb47366bbb4181ce3b2cd7aae39bfcc1c9ca3"
 dependencies = [
  "data-encoding",
  "idna",
