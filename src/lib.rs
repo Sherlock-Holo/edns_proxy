@@ -13,6 +13,7 @@ use std::time::Duration;
 use async_notify::Notify;
 use clap::Parser;
 use clap::builder::styling;
+use compio::driver::Proactor;
 use compio::net::{TcpListener, UdpSocket};
 use compio::runtime::Runtime;
 use futures_util::{FutureExt, select};
@@ -124,7 +125,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     shutdown_notify.notify_n(NonZeroUsize::new(threads).unwrap());
     for handle in join_handles {
-        if let Ok(Err(err)) = handle.join() {
+        if let Err(err) = handle.join().unwrap() {
             error!(%err, "worker thread failed");
         }
     }
@@ -426,7 +427,12 @@ fn spawn_proxy_workers(
             let backend_configs = backend_configs.clone();
 
             let handle = thread::spawn(move || {
-                let runtime = Runtime::new()?;
+                let mut builder = Runtime::builder();
+                let mut proactor_builder = Proactor::builder();
+                proactor_builder.coop_taskrun(true).taskrun_flag(true);
+
+                let runtime = builder.with_proactor(proactor_builder).build().unwrap();
+
                 runtime.block_on(async move {
                     let backends = collect_backends(&backend_configs).await?;
                     let bind_addr = create_bind_addr(proxy.bind)?;
@@ -652,17 +658,10 @@ fn create_bind_addr(bind: Bind) -> anyhow::Result<BindAddr> {
 }
 
 async fn signal_stop() -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        const SIGTERM: i32 = 15;
-        select! {
-            res = compio::signal::ctrl_c().fuse() => { res?; }
-            res = compio::signal::unix::signal(SIGTERM).fuse() => { res?; }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        compio::signal::ctrl_c().await?;
+    const SIGTERM: i32 = 15;
+    select! {
+        res = compio::signal::ctrl_c().fuse() => { res?; }
+        res = compio::signal::unix::signal(SIGTERM).fuse() => { res?; }
     }
 
     Ok(())
