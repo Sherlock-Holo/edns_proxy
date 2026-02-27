@@ -7,8 +7,9 @@ use std::time::Duration;
 use anyhow::Context;
 use bytes::BytesMut;
 use compio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use compio::net::UdpSocket;
 use compio::quic::crypto::rustls::QuicServerConfig;
-use compio::quic::{Endpoint, ServerConfig};
+use compio::quic::{Endpoint, EndpointConfig, ServerConfig};
 use compio::runtime;
 use compio_quic::congestion::BbrConfig;
 use compio_quic::{Connection, RecvStream, SendStream, TransportConfig};
@@ -16,7 +17,7 @@ use hickory_proto26::op::Message;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing::{debug, error, instrument};
 
-use crate::backend::backend2::DynBackend;
+use crate::backend::DynBackend;
 use crate::utils::PartsExt;
 
 pub struct QuicServer {
@@ -33,8 +34,8 @@ impl Debug for QuicServer {
 }
 
 impl QuicServer {
-    pub async fn new(
-        addr: SocketAddr,
+    pub fn new(
+        udp_socket: UdpSocket,
         certificate: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
         backend: Rc<dyn DynBackend>,
@@ -52,7 +53,12 @@ impl QuicServer {
             .max_idle_timeout(Some(idle.try_into()?));
         server_config.transport_config(Arc::new(transport_config));
 
-        let endpoint = Endpoint::server(addr, server_config).await?;
+        let endpoint = Endpoint::new(
+            udp_socket,
+            EndpointConfig::default(),
+            Some(server_config),
+            None,
+        )?;
 
         Ok(Self { endpoint, backend })
     }

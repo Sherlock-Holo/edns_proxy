@@ -6,7 +6,7 @@ use compio::runtime::{self, BufferPool};
 use hickory_proto26::op::{DnsResponse, Message, ResponseCode};
 use tracing::{debug, error, instrument};
 
-use crate::backend::backend2::{Backend, DynBackend};
+use crate::backend::DynBackend;
 
 pub struct UdpServer {
     udp_socket: UdpSocket,
@@ -15,11 +15,11 @@ pub struct UdpServer {
 }
 
 impl UdpServer {
-    pub fn new<B: Backend + 'static>(udp_socket: UdpSocket, backend: B) -> anyhow::Result<Self> {
+    pub fn new(udp_socket: UdpSocket, backend: Rc<dyn DynBackend>) -> anyhow::Result<Self> {
         Ok(Self {
             udp_socket,
             buffer_pool: BufferPool::new(10, 8192)?,
-            backend: Rc::new(backend),
+            backend,
         })
     }
 

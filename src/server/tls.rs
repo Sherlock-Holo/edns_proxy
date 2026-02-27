@@ -15,7 +15,7 @@ use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing::{debug, error, info, instrument};
 
-use crate::backend::backend2::DynBackend;
+use crate::backend::DynBackend;
 use crate::utils::{PartsExt, TimeoutExt};
 
 pub struct TlsServer {
@@ -34,8 +34,8 @@ impl Debug for TlsServer {
 }
 
 impl TlsServer {
-    pub async fn new(
-        addr: SocketAddr,
+    pub fn new(
+        tcp_listener: TcpListener,
         certificate: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
         backend: Rc<dyn DynBackend>,
@@ -46,7 +46,6 @@ impl TlsServer {
             .with_single_cert(certificate, private_key)?;
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
-        let tcp_listener = TcpListener::bind(addr).await?;
 
         Ok(Self {
             tls_acceptor,

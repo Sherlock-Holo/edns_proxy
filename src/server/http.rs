@@ -16,7 +16,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use bytes::Buf;
 use bytes::{Bytes, BytesMut};
+use compio::net::UdpSocket;
 use compio::net::{TcpListener, TcpStream};
+use compio::quic::crypto::rustls::QuicServerConfig;
+use compio::quic::{EndpointConfig, ServerConfig as QuicServerConfigInner};
 use compio::runtime;
 use compio::tls::{TlsAcceptor, TlsStream};
 use compio_quic::h3::server::RequestResolver;
@@ -36,7 +39,7 @@ use tower::Service;
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, instrument};
 
-use crate::backend::backend2::DynBackend;
+use crate::backend::DynBackend;
 
 #[derive(Debug)]
 struct HttpError(anyhow::Error);
@@ -106,8 +109,8 @@ impl Debug for HttpsServer {
 }
 
 impl HttpsServer {
-    pub async fn new_h2(
-        addr: SocketAddr,
+    pub fn new_h2(
+        tcp_listener: TcpListener,
         certificate: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
         path: String,
@@ -118,13 +121,39 @@ impl HttpsServer {
             .with_single_cert(certificate, private_key)?;
 
         let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
-        let tcp_listener = TcpListener::bind(addr).await?;
 
         Ok(Self {
             kind: HttpServerKind::Http2 {
                 tls_acceptor,
                 tcp_listener,
             },
+            path,
+            backend,
+        })
+    }
+
+    pub fn new_h3(
+        udp_socket: UdpSocket,
+        certificate: Vec<CertificateDer<'static>>,
+        private_key: PrivateKeyDer<'static>,
+        path: String,
+        backend: Rc<dyn DynBackend>,
+    ) -> anyhow::Result<HttpsServer> {
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certificate, private_key)?;
+        let quic_server_config = QuicServerConfig::try_from(server_config)?;
+        let endpoint = Endpoint::new(
+            udp_socket,
+            EndpointConfig::default(),
+            Some(QuicServerConfigInner::with_crypto(Arc::new(
+                quic_server_config,
+            ))),
+            None,
+        )?;
+
+        Ok(Self {
+            kind: HttpServerKind::Http3 { endpoint },
             path,
             backend,
         })

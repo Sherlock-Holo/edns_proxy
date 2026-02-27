@@ -6,16 +6,12 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.101"
 async-notify = "0.3.4"
-async-trait = "0.1.89"
 bytes = "1.11.1"
 cidr = "0.3.2"
 clap = { version = "4.5.59", features = ["derive", "env"] }
-deadpool = { version = "0.13.0", features = ["rt_tokio_1"] }
+deadpool = "0.13.0"
 educe = { version = "0.6.0", default-features = false, features = ["Debug"] }
 futures-util = "0.3.32"
-hickory-proto = { version = "0.25.2", features = ["https-aws-lc-rs"] } # disable dnssec to fix compile error
-hickory-resolver = { version = "0.25.2", default-features = false, features = ["tokio"] }
-hickory-server = { version = "0.25.2", features = ["https-aws-lc-rs", "h3-aws-lc-rs", "quic-aws-lc-rs"] }
 humantime-serde = "1.1.1"
 itertools = "0.14.0"
 mimalloc = "0.1.48"
@@ -29,7 +25,6 @@ rustls-pemfile = "2.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9"
 socket2 = "0.6.2"
-tokio = { version = "1.49.0", features = ["macros", "net", "rt", "signal"] }
 tower = "0.5.3"
 tracing = "0.1.44"
 tracing-appender = "0.2.4"
@@ -39,7 +34,7 @@ tracing-subscriber = "0.3.22"
 
 arc-swap = "1.8.2"
 axum = { version = "0.8.8", default-features = false, features = ["http2", "tower-log", "tracing"] }
-compio = { version = "0.18.0", features = ["macros", "net", "quic", "rustls", "time"] }
+compio = { version = "0.18.0", features = ["macros", "net", "quic", "rustls", "signal", "time"] }
 compio-quic = { version = "0.7.0", default-features = false, features = ["h3"] }
 cyper = { version = "0.8.1", default-features = false, features = ["http2", "http3", "rustls", "stream"] }
 cyper-axum = { version = "0.8.0", features = ["http2"] }

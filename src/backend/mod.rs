@@ -1,39 +1,42 @@
-use std::fmt::Debug;
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use async_trait::async_trait;
-use hickory_proto::op::Message;
-use hickory_proto::xfer::DnsResponse;
-
-pub mod backend2;
 mod group;
-mod h3;
 mod https;
 mod quic;
 mod static_file;
 mod tls;
 mod udp;
 
-pub use group::Group;
-pub use h3::H3Backend;
-pub use https::HttpsBackend;
-pub use quic::QuicBackend;
-pub use static_file::StaticFileBackend;
-pub use tls::TlsBackend;
-pub use udp::UdpBackend;
+use std::net::SocketAddr;
 
-pub type DynBackend = Arc<dyn Backend + Send + Sync>;
+use futures_util::FutureExt;
+use futures_util::future::LocalBoxFuture;
+use hickory_proto26::op::{DnsResponse, Message};
 
-#[async_trait]
-pub trait Backend: Debug {
+pub use self::group::Group;
+pub use self::https::HttpsBackend;
+pub use self::quic::QuicBackend;
+pub use self::static_file::StaticFileBackend;
+pub use self::tls::TlsBackend;
+pub use self::udp::UdpBackend;
+
+pub trait Backend {
     async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse>;
 }
 
-#[async_trait]
-impl Backend for DynBackend {
-    async fn send_request(&self, message: Message, src: SocketAddr) -> anyhow::Result<DnsResponse> {
-        (**self).send_request(message, src).await
+pub trait DynBackend {
+    fn dyn_send_request(
+        &self,
+        message: Message,
+        src: SocketAddr,
+    ) -> LocalBoxFuture<'_, anyhow::Result<DnsResponse>>;
+}
+
+impl<T: Backend> DynBackend for T {
+    fn dyn_send_request(
+        &self,
+        message: Message,
+        src: SocketAddr,
+    ) -> LocalBoxFuture<'_, anyhow::Result<DnsResponse>> {
+        self.send_request(message, src).boxed_local()
     }
 }
 
@@ -42,12 +45,11 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Once;
 
-    use hickory_proto::op::{Message, Query};
-    use hickory_proto::rr::{Name, RData, RecordType};
-    use hickory_proto::xfer::DnsResponse;
+    use hickory_proto26::op::{DnsResponse, Message, Query};
+    use hickory_proto26::rr::{Name, RData, RecordType};
 
     pub fn create_query_message() -> Message {
-        let mut message = Message::new();
+        let mut message = Message::query();
         message.add_query(Query::query(
             Name::from_utf8("www.example.com").unwrap(),
             RecordType::A,
