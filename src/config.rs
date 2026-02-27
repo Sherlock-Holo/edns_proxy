@@ -9,6 +9,8 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
+    #[serde(default)]
+    pub workers: WorkersConfig,
     pub proxy: Vec<Proxy>,
     pub backend: Vec<Backend>,
 }
@@ -31,8 +33,6 @@ pub struct Proxy {
     pub cache: Option<Cache>,
     #[serde(default)]
     pub route: Vec<Route>,
-    #[serde(default)]
-    pub workers: WorkersConfig,
     pub retry_attempts: Option<NonZeroUsize>,
 }
 

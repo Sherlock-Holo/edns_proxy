@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
-use std::iter::repeat_n;
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroUsize;
@@ -15,8 +14,10 @@ use clap::Parser;
 use clap::builder::styling;
 use compio::driver::Proactor;
 use compio::net::{TcpListener, UdpSocket};
+use compio::runtime;
 use compio::runtime::Runtime;
-use futures_util::{FutureExt, select};
+use futures_util::stream::FuturesUnordered;
+use futures_util::{FutureExt, TryStreamExt, select};
 use hickory_proto26::op::{Message, Query};
 use hickory_proto26::rr::{Name, RData, RecordType};
 use itertools::Itertools;
@@ -110,20 +111,27 @@ pub async fn run() -> anyhow::Result<()> {
     )?;
     init_tls_provider();
 
-    let config = Config::read(&args.config)?;
+    let Config {
+        workers,
+        proxy,
+        backend,
+    } = Config::read(&args.config)?;
 
     info!(config = %args.config, "edns-proxy config loaded");
 
-    let (join_handles, shutdown_notify, threads) =
-        spawn_proxy_workers(config.proxy, config.backend)?;
+    let workers = workers.count();
+    let (join_handles, shutdown_notify, shutdown_waiters) =
+        spawn_proxy_workers(proxy, backend, workers)?;
 
-    info!(workers = threads, "proxy workers started");
+    info!(workers, "proxy workers started");
 
     signal_stop().await?;
 
     info!("shutdown signal received, stopping proxy workers");
 
-    shutdown_notify.notify_n(NonZeroUsize::new(threads).unwrap());
+    if let Some(waiters) = NonZeroUsize::new(shutdown_waiters) {
+        shutdown_notify.notify_n(waiters);
+    }
     for handle in join_handles {
         if let Err(err) = handle.join().unwrap() {
             error!(%err, "worker thread failed");
@@ -412,29 +420,31 @@ type SpawnResult = (
 fn spawn_proxy_workers(
     proxy_configs: Vec<Proxy>,
     backend_configs: Vec<config::Backend>,
+    threads: usize,
 ) -> anyhow::Result<SpawnResult> {
     let mut join_handles = Vec::new();
     let shutdown_notify = Arc::new(Notify::new());
+    let proxy_configs = Arc::<[Proxy]>::from(proxy_configs);
     let backend_configs = Arc::<[config::Backend]>::from(backend_configs);
+    let shutdown_waiters = threads * proxy_configs.len();
 
-    let mut threads = 0;
-    for proxy in proxy_configs {
-        let n = proxy.workers.count();
-        threads += n;
+    for _ in 0..threads {
+        let shutdown = shutdown_notify.clone();
+        let backend_configs = backend_configs.clone();
+        let proxy_configs = proxy_configs.clone();
 
-        for proxy in repeat_n(proxy.clone(), n) {
-            let shutdown = shutdown_notify.clone();
-            let backend_configs = backend_configs.clone();
+        let handle = thread::spawn(move || {
+            let mut builder = Runtime::builder();
+            let mut proactor_builder = Proactor::builder();
+            proactor_builder.coop_taskrun(true).taskrun_flag(true);
 
-            let handle = thread::spawn(move || {
-                let mut builder = Runtime::builder();
-                let mut proactor_builder = Proactor::builder();
-                proactor_builder.coop_taskrun(true).taskrun_flag(true);
+            let runtime = builder.with_proactor(proactor_builder).build().unwrap();
 
-                let runtime = builder.with_proactor(proactor_builder).build().unwrap();
+            runtime.block_on(async move {
+                let backends = collect_backends(&backend_configs).await?;
+                let mut servers = FuturesUnordered::new();
 
-                runtime.block_on(async move {
-                    let backends = collect_backends(&backend_configs).await?;
+                for proxy in proxy_configs.iter().cloned() {
                     let bind_addr = create_bind_addr(proxy.bind)?;
                     let default_backend = backends
                         .get(&proxy.backend)
@@ -468,31 +478,46 @@ fn spawn_proxy_workers(
                         }
                     }
 
+                    let retry_attempts = proxy.retry_attempts.unwrap_or(DEFAULT_RETRY_ATTEMPTS);
                     let proxy_backend = ProxyBackend::new(
                         proxy.cache.map(|c| {
                             Cache::new(c.capacity, c.ipv4_fuzz_prefix, c.ipv6_fuzz_prefix)
                         }),
                         default_backend,
                         route,
-                        proxy.retry_attempts.unwrap_or(DEFAULT_RETRY_ATTEMPTS),
+                        retry_attempts,
                     );
 
                     info!(
                         ?bind_addr,
                         backend = %proxy.backend,
-                        retry_attempts = proxy.retry_attempts.unwrap_or(DEFAULT_RETRY_ATTEMPTS).get(),
+                        retry_attempts = retry_attempts.get(),
                         "proxy worker initialized"
                     );
 
-                    run_server_until_shutdown(bind_addr, Rc::new(proxy_backend), shutdown).await
-                })
-            });
+                    servers.push(runtime::spawn(run_server_until_shutdown(
+                        bind_addr,
+                        Rc::new(proxy_backend),
+                        shutdown.clone(),
+                    )));
+                }
 
-            join_handles.push(handle);
-        }
+                while let Some(res) = servers
+                    .try_next()
+                    .await
+                    .map_err(|err| anyhow::anyhow!("proxy panic: {err:?}"))?
+                {
+                    res?;
+                }
+
+                Err(anyhow::anyhow!("proxy worker stop unexpectedly"))
+            })
+        });
+
+        join_handles.push(handle);
     }
 
-    Ok((join_handles, shutdown_notify, threads))
+    Ok((join_handles, shutdown_notify, shutdown_waiters))
 }
 
 fn filter_backend(filter: Vec<Filter>, backend: Rc<dyn DynBackend>) -> Rc<dyn DynBackend> {
